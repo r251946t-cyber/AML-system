@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from functools import wraps
 from queue import Queue
+from urllib.parse import unquote, urlparse
 
 from dotenv import load_dotenv
 from flask import Flask, Response, flash, g, redirect, render_template, request, session, url_for
@@ -44,23 +45,44 @@ ID_NUMBER_FORMAT_MESSAGE = "ID number must use the format 00-000000A00, for exam
 
 
 class DatabaseAdapter:
-    def __init__(self, connection, is_postgres):
+    def __init__(self, connection, engine):
         self.connection = connection
-        self.is_postgres = is_postgres
+        self.engine = engine
+
+    @property
+    def is_postgres(self):
+        return self.engine == "postgres"
+
+    @property
+    def is_mysql(self):
+        return self.engine == "mysql"
+
+    def normalize_query(self, query):
+        if self.is_postgres or self.is_mysql:
+            return query.replace("?", "%s")
+        return query
 
     def execute(self, query, params=()):
+        query = self.normalize_query(query)
         if self.is_postgres:
             cursor = self.connection.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(query, params)
+            return cursor
+        if self.is_mysql:
+            cursor = self.connection.cursor(dictionary=True, buffered=True)
             cursor.execute(query, params)
             return cursor
         return self.connection.execute(query, params)
 
     def executescript(self, script):
-        if self.is_postgres:
+        if self.is_postgres or self.is_mysql:
             statements = [statement.strip() for statement in script.split(";") if statement.strip()]
             for statement in statements:
-                with self.connection.cursor() as cursor:
-                    cursor.execute(statement)
+                cursor = self.connection.cursor()
+                try:
+                    cursor.execute(self.normalize_query(statement))
+                finally:
+                    cursor.close()
             return None
         self.connection.executescript(script)
 
@@ -78,6 +100,10 @@ def is_postgres_database_url(database_url):
     return bool(database_url) and database_url.startswith(("postgres://", "postgresql://"))
 
 
+def is_mysql_database_url(database_url):
+    return bool(database_url) and database_url.startswith(("mysql://", "mysql+mysqlconnector://"))
+
+
 def connect_db():
     database_url = app.config["DATABASE"]
     if is_postgres_database_url(database_url):
@@ -86,11 +112,26 @@ def connect_db():
 
         conn = psycopg2.connect(database_url)
         conn.autocommit = False
-        return DatabaseAdapter(conn, True)
+        return DatabaseAdapter(conn, "postgres")
+
+    if is_mysql_database_url(database_url):
+        import mysql.connector
+
+        parsed_url = urlparse(database_url)
+        conn = mysql.connector.connect(
+            host=parsed_url.hostname or "localhost",
+            port=parsed_url.port or 3306,
+            user=unquote(parsed_url.username or ""),
+            password=unquote(parsed_url.password or ""),
+            database=parsed_url.path.lstrip("/"),
+            charset="utf8mb4",
+            collation="utf8mb4_unicode_ci",
+        )
+        return DatabaseAdapter(conn, "mysql")
 
     conn = sqlite3.connect(database_url)
     conn.row_factory = sqlite3.Row
-    return DatabaseAdapter(conn, False)
+    return DatabaseAdapter(conn, "sqlite")
 
 
 def get_db():
@@ -235,6 +276,52 @@ def ensure_background_monitor():
 
 
 def get_schema_sql():
+    if is_mysql_database_url(app.config["DATABASE"]):
+        return """
+        CREATE TABLE IF NOT EXISTS users (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            username VARCHAR(255) UNIQUE NOT NULL,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            id_number VARCHAR(32) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            role VARCHAR(64) NOT NULL,
+            account_number VARCHAR(64) UNIQUE NOT NULL,
+            balance DOUBLE DEFAULT 0,
+            created_at VARCHAR(64) NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS transactions (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            sender_account VARCHAR(64) NOT NULL,
+            receiver_account VARCHAR(64) NOT NULL,
+            amount DOUBLE NOT NULL,
+            transaction_type VARCHAR(64) NOT NULL,
+            timestamp VARCHAR(64) NOT NULL,
+            status VARCHAR(64) NOT NULL,
+            risk_score DOUBLE DEFAULT 0,
+            risk_level VARCHAR(64) DEFAULT 'normal',
+            description TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS alerts (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            transaction_id BIGINT NOT NULL,
+            account_number VARCHAR(64) NOT NULL,
+            risk_score DOUBLE NOT NULL,
+            risk_level VARCHAR(64) NOT NULL,
+            reason TEXT NOT NULL,
+            timestamp VARCHAR(64) NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS activity_log (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            actor VARCHAR(255) NOT NULL,
+            action VARCHAR(255) NOT NULL,
+            detail TEXT NOT NULL,
+            timestamp VARCHAR(64) NOT NULL
+        );
+        """
+
     if is_postgres_database_url(app.config["DATABASE"]):
         return """
         CREATE TABLE IF NOT EXISTS users (
@@ -330,7 +417,7 @@ def get_schema_sql():
 def init_db():
     conn = connect_db()
     conn.executescript(get_schema_sql())
-    if not is_postgres_database_url(app.config["DATABASE"]):
+    if not is_postgres_database_url(app.config["DATABASE"]) and not is_mysql_database_url(app.config["DATABASE"]):
         columns = [row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()]
         if "email" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
@@ -383,11 +470,21 @@ def get_user_by_id_number(id_number):
     ).fetchone()
 
 
+def get_user_by_account_number(account_number):
+    return get_db().execute(
+        "SELECT * FROM users WHERE account_number = ?", (account_number,)
+    ).fetchone()
+
+
 def normalize_id_number(id_number):
     compact_id = re.sub(r"[^0-9A-Za-z]", "", id_number).upper()
     if re.fullmatch(r"\d{8,9}[A-Z]\d{2}", compact_id):
         return f"{compact_id[:2]}-{compact_id[2:]}"
     return id_number.strip().upper()
+
+
+def normalize_account_number(account_number):
+    return account_number.strip().upper()
 
 
 def is_valid_id_number(id_number):
@@ -409,6 +506,9 @@ def record_activity(actor, action, detail):
 def get_last_insert_id(conn):
     if is_postgres_database_url(app.config["DATABASE"]):
         cursor = conn.execute("SELECT LASTVAL() as id")
+        return cursor.fetchone()["id"]
+    if is_mysql_database_url(app.config["DATABASE"]):
+        cursor = conn.execute("SELECT LAST_INSERT_ID() as id")
         return cursor.fetchone()["id"]
     cursor = conn.execute("SELECT last_insert_rowid() as id")
     return cursor.fetchone()["id"]
@@ -634,7 +734,7 @@ def create_transaction():
     user = get_user_by_id(session["user_id"])
     tx_type = request.form.get("type")
     amount = float(request.form.get("amount", 0))
-    recipient = request.form.get("recipient", "").strip()
+    recipient_account = normalize_account_number(request.form.get("recipient", ""))
 
     if amount <= 0:
         flash("Please enter a valid amount.")
@@ -645,7 +745,7 @@ def create_transaction():
         return redirect(url_for("customer_dashboard"))
 
     if tx_type == "transfer":
-        recipient_user = get_user_by_username(recipient)
+        recipient_user = get_user_by_account_number(recipient_account)
         if recipient_user is None or recipient_user["id"] == user["id"]:
             flash("Recipient account not found.")
             return redirect(url_for("customer_dashboard"))

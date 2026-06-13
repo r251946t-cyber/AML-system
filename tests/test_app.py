@@ -28,6 +28,25 @@ def test_health_endpoint(client):
     assert b"ok" in response.data.lower()
 
 
+def test_mysql_database_url_uses_mysql_schema():
+    original_database = aml_app.app.config["DATABASE"]
+    aml_app.app.config["DATABASE"] = "mysql://aml:aml123@localhost:3306/aml"
+    try:
+        assert aml_app.is_mysql_database_url(aml_app.app.config["DATABASE"])
+        schema = aml_app.get_schema_sql()
+        assert "AUTO_INCREMENT" in schema
+        assert "VARCHAR(255) UNIQUE NOT NULL" in schema
+    finally:
+        aml_app.app.config["DATABASE"] = original_database
+
+
+def test_database_adapter_translates_placeholders_for_mysql():
+    adapter = aml_app.DatabaseAdapter(connection=None, engine="mysql")
+    assert adapter.normalize_query("SELECT * FROM users WHERE email = ? AND id_number = ?") == (
+        "SELECT * FROM users WHERE email = %s AND id_number = %s"
+    )
+
+
 def test_register_and_login(client):
     response = client.post(
         "/register",
@@ -141,6 +160,8 @@ def test_high_value_transfer_creates_alert(client):
         data={"otp": receiver_otp},
         follow_redirects=True,
     )
+    with aml_app.app.app_context():
+        receiver_account = aml_app.get_user_by_username("receiver")["account_number"]
 
     client.post(
         "/login",
@@ -150,7 +171,7 @@ def test_high_value_transfer_creates_alert(client):
 
     response = client.post(
         "/customer/transaction",
-        data={"type": "transfer", "recipient": "receiver", "amount": "1500"},
+        data={"type": "transfer", "recipient": receiver_account, "amount": "1500"},
         follow_redirects=True,
     )
 
@@ -222,6 +243,8 @@ def test_reports_show_alert_history(client):
         data={"otp": receiver2_otp},
         follow_redirects=True,
     )
+    with aml_app.app.app_context():
+        receiver2_account = aml_app.get_user_by_username("receiver2")["account_number"]
     client.post(
         "/login",
         data={"email": "sender2@example.com", "id_number": "63-3333333A33", "password": "secret123"},
@@ -229,7 +252,7 @@ def test_reports_show_alert_history(client):
     )
     client.post(
         "/customer/transaction",
-        data={"type": "transfer", "recipient": "receiver2", "amount": "1500"},
+        data={"type": "transfer", "recipient": receiver2_account, "amount": "1500"},
         follow_redirects=True,
     )
 

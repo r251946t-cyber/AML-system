@@ -1,15 +1,16 @@
 version: '3.9'
 services:
-  postgres:
-    image: postgres:16
+  mysql:
+    image: mysql:8.4
     environment:
-      POSTGRES_DB: aml
-      POSTGRES_USER: aml
-      POSTGRES_PASSWORD: aml123
+      MYSQL_DATABASE: aml
+      MYSQL_USER: aml
+      MYSQL_PASSWORD: aml123
+      MYSQL_ROOT_PASSWORD: root123
     ports:
-      - "5432:5432"
+      - "3306:3306"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - mysql_data:/var/lib/mysql
 
   redis:
     image: redis:7
@@ -35,4 +36,4 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
 volumes:
-  postgres_data:
+  mysql_data:
