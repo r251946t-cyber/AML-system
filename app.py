@@ -39,8 +39,8 @@ app.logger.setLevel(logging.INFO)
 socketio = SocketIO(app, cors_allowed_origins="*")
 app.extensions["realtime_broker"] = RealtimeBroker(app=app, socketio=socketio)
 
-ID_NUMBER_PATTERN = re.compile(r"^\d{2}-\d{7}[A-Z]\d{2}$")
-ID_NUMBER_FORMAT_MESSAGE = "ID number must use the format 00-0000000A00, for example 63-1234567A47."
+ID_NUMBER_PATTERN = re.compile(r"^\d{2}-\d{6,7}[A-Z]\d{2}$")
+ID_NUMBER_FORMAT_MESSAGE = "ID number must use the format 00-000000A00, for example 08-995728P34."
 
 
 class DatabaseAdapter:
@@ -384,6 +384,9 @@ def get_user_by_id_number(id_number):
 
 
 def normalize_id_number(id_number):
+    compact_id = re.sub(r"[^0-9A-Za-z]", "", id_number).upper()
+    if re.fullmatch(r"\d{8,9}[A-Z]\d{2}", compact_id):
+        return f"{compact_id[:2]}-{compact_id[2:]}"
     return id_number.strip().upper()
 
 

@@ -34,7 +34,7 @@ def test_register_and_login(client):
         data={
             "username": "newuser",
             "email": "newuser@example.com",
-            "id_number": "63-1234567A47",
+            "id_number": "631234567a47",
             "password": "secret123",
             "role": "customer",
         },
@@ -57,7 +57,41 @@ def test_register_and_login(client):
 
     login = client.post(
         "/login",
-        data={"email": "newuser@example.com", "id_number": "63-1234567A47", "password": "secret123"},
+        data={"email": "newuser@example.com", "id_number": "631234567a47", "password": "secret123"},
+        follow_redirects=True,
+    )
+    assert login.status_code == 200
+    assert b"Customer" in login.data or b"Banking" in login.data
+
+
+def test_register_and_login_accepts_six_digit_id_body(client):
+    response = client.post(
+        "/register",
+        data={
+            "username": "sixdigit",
+            "email": "sixdigit@example.com",
+            "id_number": "08995728p34",
+            "password": "secret123",
+            "role": "customer",
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert b"verification code" in response.data.lower()
+
+    with client.session_transaction() as session:
+        otp = session["pending_registration"]["otp"]
+        assert session["pending_registration"]["id_number"] == "08-995728P34"
+
+    client.post(
+        "/register",
+        data={"otp": otp},
+        follow_redirects=True,
+    )
+
+    login = client.post(
+        "/login",
+        data={"email": "sixdigit@example.com", "id_number": "08-995728P34", "password": "secret123"},
         follow_redirects=True,
     )
     assert login.status_code == 200
@@ -78,7 +112,7 @@ def test_register_rejects_invalid_id_format(client):
     )
 
     assert response.status_code == 200
-    assert b"00-0000000A00" in response.data
+    assert b"00-000000A00" in response.data
 
 
 def test_high_value_transfer_creates_alert(client):
