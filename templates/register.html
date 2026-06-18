@@ -28,12 +28,6 @@
         <input id="id_number" name="id_number" autocomplete="off" pattern="[0-9]{2}-?[0-9]{6,7}[A-Za-z][0-9]{2}" title="Type your ID number; it will be formatted like 08-995728P34." required>
         <label for="password">Password</label>
         <input id="password" type="password" name="password" autocomplete="new-password" required>
-        <label for="role">Role</label>
-        <select id="role" name="role">
-          <option value="customer">Customer</option>
-          <option value="compliance">Compliance Officer</option>
-          <option value="admin">Admin</option>
-        </select>
         <button type="submit">Send Verification Code</button>
       {% endif %}
     </form>

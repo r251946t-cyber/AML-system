@@ -9,7 +9,11 @@ import app as aml_app
 
 @pytest.fixture()
 def client():
-    aml_app.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+    aml_app.app.config.update(
+        TESTING=True,
+        SECRET_KEY="test-secret",
+        DATABASE=str(aml_app.TestingConfig.DATABASE_URL),
+    )
     if os.path.exists(aml_app.app.config["DATABASE"]):
         try:
             os.remove(aml_app.app.config["DATABASE"])
@@ -262,7 +266,7 @@ def test_reports_show_alert_history(client):
     )
     client.post(
         "/login",
-        data={"email": "compliance@example.com", "id_number": "63-1000002A02", "password": "compliance123"},
+        data={"login": "Compliance", "password": "Compliance123"},
         follow_redirects=True,
     )
 
@@ -270,3 +274,45 @@ def test_reports_show_alert_history(client):
     assert response.status_code == 200
     assert b"Alert history" in response.data
     assert b"Suspicious transactions" in response.data
+
+
+def test_staff_login_requires_reserved_username(client):
+    response = client.post(
+        "/login",
+        data={"login": "Admin", "password": "Admin123"},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert b"Administrative Control Center" in response.data
+
+    client.get("/logout", follow_redirects=True)
+    rejected = client.post(
+        "/login",
+        data={"email": "admin@example.com", "id_number": "63-1000001A01", "password": "Admin123"},
+        follow_redirects=True,
+    )
+    assert rejected.status_code == 200
+    assert b"Administrative Control Center" not in rejected.data
+    assert b"Invalid credentials" in rejected.data or b"All fields are required" in rejected.data
+
+
+def test_registration_cannot_create_staff_role(client):
+    response = client.post(
+        "/register",
+        data={
+            "username": "fakeofficer",
+            "email": "fakeofficer@example.com",
+            "id_number": "63-5555555A55",
+            "password": "secret123",
+            "role": "admin",
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    with client.session_transaction() as session:
+        otp = session["pending_registration"]["otp"]
+
+    client.post("/register", data={"otp": otp}, follow_redirects=True)
+    with aml_app.app.app_context():
+        user = aml_app.get_user_by_username("fakeofficer")
+        assert user["role"] == "customer"

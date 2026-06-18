@@ -6,13 +6,27 @@ A Flask-based AML monitoring prototype with authentication, transactions, risk s
 
 1. Install dependencies:
    `pip install -r requirements.txt`
-2. Start MySQL:
-   `docker compose up -d mysql`
-3. Set `DATABASE_URL` in `.env`:
-   `DATABASE_URL=mysql://aml:aml123@localhost:3306/aml`
-4. Start the app:
+2. Create the local MySQL database and user:
+
+```sql
+CREATE DATABASE IF NOT EXISTS aml CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS 'aml'@'localhost' IDENTIFIED BY 'aml123';
+CREATE USER IF NOT EXISTS 'aml'@'127.0.0.1' IDENTIFIED BY 'aml123';
+GRANT ALL PRIVILEGES ON aml.* TO 'aml'@'localhost';
+GRANT ALL PRIVILEGES ON aml.* TO 'aml'@'127.0.0.1';
+FLUSH PRIVILEGES;
+```
+
+3. Confirm `.env` contains:
+   `DATABASE_URL=mysql://aml:aml123@127.0.0.1:3306/aml`
+4. Start the app; it creates the tables and seeds staff accounts automatically:
    `python app.py`
 5. Open http://127.0.0.1:5000
+
+The first app start creates the MySQL tables and seeds:
+
+- Admin / Admin123
+- Compliance / Compliance123
 
 ## Production notes
 
