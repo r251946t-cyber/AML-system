@@ -245,6 +245,25 @@ button:hover { filter: brightness(1.04); }
   background: #fff7dc;
   color: #7a5b00;
   border: 1px solid #f0d98d;
+  animation: flash-enter 0.24s ease-out;
+  overflow: hidden;
+  transition:
+    opacity 0.35s ease,
+    transform 0.35s ease,
+    max-height 0.35s ease,
+    margin 0.35s ease,
+    padding 0.35s ease,
+    border-width 0.35s ease;
+  max-height: 160px;
+}
+.flash-messages.is-clearing {
+  opacity: 0;
+  transform: translateY(-8px);
+  max-height: 0;
+  margin-bottom: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-width: 0;
 }
 
 ul { padding-left: 1.1rem; }
@@ -266,6 +285,17 @@ li { margin-bottom: 0.45rem; }
   font-weight: 700;
 }
 .status-pill.alert { background: #ffeaea; color: var(--zb-danger); }
+
+@keyframes flash-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
 
 @media (max-width: 760px) {
   .topbar { flex-direction: column; align-items: flex-start; gap: 0.8rem; }

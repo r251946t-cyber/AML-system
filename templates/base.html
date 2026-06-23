@@ -52,5 +52,13 @@
         {% block content %}{% endblock %}
       </main>
     </div>
+    <script>
+      document.querySelectorAll(".flash-messages").forEach((flash) => {
+        window.setTimeout(() => {
+          flash.classList.add("is-clearing");
+          flash.addEventListener("transitionend", () => flash.remove(), { once: true });
+        }, 5000);
+      });
+    </script>
   </body>
 </html>
