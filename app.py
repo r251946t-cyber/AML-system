@@ -216,11 +216,11 @@ def get_schema_sql():
     is_my = is_mysql_database_url(app.config["DATABASE"])
 
     if is_my:
-        ai, pk_type, text_type, real_type = "AUTO_INCREMENT", "BIGINT", "VARCHAR(255)", "DOUBLE"
+        ai, pk_type, text_type, long_text_type, real_type = "AUTO_INCREMENT", "BIGINT", "VARCHAR(255)", "LONGTEXT", "DOUBLE"
     elif is_pg:
-        ai, pk_type, text_type, real_type = "GENERATED ALWAYS AS IDENTITY", "BIGINT", "TEXT", "DOUBLE PRECISION"
+        ai, pk_type, text_type, long_text_type, real_type = "GENERATED ALWAYS AS IDENTITY", "BIGINT", "TEXT", "TEXT", "DOUBLE PRECISION"
     else:
-        ai, pk_type, text_type, real_type = "AUTOINCREMENT", "INTEGER", "TEXT", "REAL"
+        ai, pk_type, text_type, long_text_type, real_type = "AUTOINCREMENT", "INTEGER", "TEXT", "TEXT", "REAL"
 
     if is_pg:
         pk_clause = lambda col: f"{col} BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY"
@@ -259,8 +259,8 @@ def get_schema_sql():
         status {text_type} NOT NULL,
         risk_score {real_type} DEFAULT 0,
         risk_level {text_type} DEFAULT 'normal',
-        description {text_type},
-        rules_triggered {text_type} DEFAULT '[]',
+        description {long_text_type},
+        rules_triggered {long_text_type},
         ctr_required INTEGER DEFAULT 0,
         sar_required INTEGER DEFAULT 0,
         reviewed_by {text_type},
@@ -273,11 +273,11 @@ def get_schema_sql():
         account_number {text_type} NOT NULL,
         risk_score {real_type} NOT NULL,
         risk_level {text_type} NOT NULL,
-        reason {text_type} NOT NULL,
-        rules_triggered {text_type} DEFAULT '[]',
+        reason {long_text_type} NOT NULL,
+        rules_triggered {long_text_type},
         status {text_type} DEFAULT 'open',
         assigned_to {text_type},
-        case_notes {text_type},
+        case_notes {long_text_type},
         resolved_at {text_type},
         resolved_by {text_type},
         timestamp {text_type} NOT NULL
@@ -288,7 +288,7 @@ def get_schema_sql():
         alert_id INTEGER NOT NULL,
         account_number {text_type} NOT NULL,
         filed_by {text_type} NOT NULL,
-        narrative {text_type} NOT NULL,
+        narrative {long_text_type} NOT NULL,
         status {text_type} DEFAULT 'draft',
         filed_at {text_type},
         reference_number {text_type},
@@ -312,7 +312,7 @@ def get_schema_sql():
         id_number {text_type},
         account_number {text_type},
         list_type {text_type} NOT NULL,
-        reason {text_type},
+        reason {long_text_type},
         added_by {text_type} NOT NULL,
         added_at {text_type} NOT NULL
     );
@@ -321,7 +321,7 @@ def get_schema_sql():
         {pk_clause("id")},
         actor {text_type} NOT NULL,
         action {text_type} NOT NULL,
-        detail {text_type} NOT NULL,
+        detail {long_text_type} NOT NULL,
         ip_address {text_type},
         timestamp {text_type} NOT NULL
     );
@@ -334,6 +334,8 @@ def init_db():
     # SQLite migration: add new columns to existing tables
     if not is_postgres_database_url(app.config["DATABASE"]) and not is_mysql_database_url(app.config["DATABASE"]):
         _migrate_sqlite(conn)
+    elif is_mysql_database_url(app.config["DATABASE"]):
+        _migrate_mysql(conn)
     conn.commit()
     conn.close()
 
@@ -354,6 +356,22 @@ def _migrate_sqlite(conn):
             col_name = col_def.split()[0]
             if col_name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+
+
+def _migrate_mysql(conn):
+    """Widen older MySQL VARCHAR columns that store AML evidence JSON/text."""
+    migrations = [
+        "ALTER TABLE transactions MODIFY COLUMN description LONGTEXT",
+        "ALTER TABLE transactions MODIFY COLUMN rules_triggered LONGTEXT",
+        "ALTER TABLE alerts MODIFY COLUMN reason LONGTEXT NOT NULL",
+        "ALTER TABLE alerts MODIFY COLUMN rules_triggered LONGTEXT",
+        "ALTER TABLE alerts MODIFY COLUMN case_notes LONGTEXT",
+        "ALTER TABLE sar_reports MODIFY COLUMN narrative LONGTEXT NOT NULL",
+        "ALTER TABLE watchlist MODIFY COLUMN reason LONGTEXT",
+        "ALTER TABLE activity_log MODIFY COLUMN detail LONGTEXT NOT NULL",
+    ]
+    for statement in migrations:
+        conn.execute(statement)
 
 
 def seed_demo_data():

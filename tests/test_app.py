@@ -44,6 +44,7 @@ def test_mysql_database_url_uses_mysql_schema():
         schema = aml_app.get_schema_sql()
         assert "AUTO_INCREMENT" in schema
         assert "VARCHAR(255) UNIQUE NOT NULL" in schema
+        assert "rules_triggered LONGTEXT" in schema
     finally:
         aml_app.app.config["DATABASE"] = original_database
 
