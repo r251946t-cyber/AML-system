@@ -7,3 +7,7 @@ redis>=5.0,<6.0
 psycopg2-binary>=2.9,<3.0
 mysql-connector-python>=9.0,<10.0
 kafka-python>=2.0,<3.0
+scikit-learn>=1.5
+pandas>=2.2
+numpy>=2.0
+joblib>=1.4

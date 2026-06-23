@@ -41,7 +41,6 @@ HIGH_RISK_COUNTRIES = {         # FATF grey/black list (illustrative subset)
     "IR", "KP", "MM", "RU", "SY", "YE", "ML", "BF", "SO",
 }
 
-
 @dataclass
 class RuleResult:
     rule_id: str

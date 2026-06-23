@@ -741,6 +741,21 @@ def register():
     return render_template("register.html")
 
 
+@app.route('/generate_transactions', methods=['POST'])
+@login_reqired
+def generate_transactions():
+
+    count = int(request.form.get("count", 100))
+
+    for _ in range(count):
+        # generate fake transactions here
+        pass
+
+    flash(f"{count} transactions generated successfully!")
+
+    return redirect(url_for('admin_dashboard'))
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":

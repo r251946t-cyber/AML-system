@@ -5,6 +5,25 @@
   <h2>Administrative Control Center</h2>
   <p>Oversee users, manage permissions, and review AML activity across the bank.</p>
 </section>
+
+<div class="card">
+    <h3>Transaction Simulator</h3>
+
+    <form method="post" action="{{ url_for('generate_transactions') }}">
+        <label>Number of Transactions</label>
+
+        <select name="count">
+            <option value="100">100</option>
+            <option value="500">500</option>
+            <option value="1000">1000</option>
+        </select>
+
+        <button type="submit">
+            Generate Transactions
+        </button>
+    </form>
+</div>
+
 <section class="grid">
   <div class="card">
     <h3>Manage Users</h3>
@@ -33,6 +52,41 @@
     </ul>
   </div>
 </section>
+
+<div class="card table-card">
+    <h3>Registered Users</h3>
+
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Username</th>
+                <th>Email</th>
+                <th>Account Number</th>
+                <th>Role</th>
+                <th>Balance</th>
+                <th>KYC</th>
+                <th>Created</th>
+            </tr>
+        </thead>
+
+        <tbody>
+            {% for user in users %}
+            <tr>
+                <td>{{ user.id }}</td>
+                <td>{{ user.username }}</td>
+                <td>{{ user.email }}</td>
+                <td>{{ user.account_number }}</td>
+                <td>{{ user.role }}</td>
+                <td>${{ "%.2f"|format(user.balance) }}</td>
+                <td>{{ user.kyc_status }}</td>
+                <td>{{ user.created_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
 <section class="card table-card">
   <h3>Recent Transactions</h3>
   <ul>
