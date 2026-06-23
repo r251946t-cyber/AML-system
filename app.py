@@ -50,6 +50,7 @@ from flask import (
 from flask_socketio import SocketIO
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from ai_detector import delete_ai_model, predict_risk_level, train_ai_model
 from aml_logic import analyze_transaction, get_triggered_rules
 from config import DevelopmentConfig, ProductionConfig, TestingConfig
 from realtime import RealtimeBroker
@@ -81,6 +82,12 @@ ID_NUMBER_PATTERN = re.compile(r"^\d{2}-\d{6,7}[A-Z]\d{2}$")
 ID_NUMBER_FORMAT_MESSAGE = "ID number must use the format 00-000000A00, for example 08-995728P34."
 
 PAGE_SIZE = 25  # rows per paginated list
+
+AI_RISK_SCORES = {
+    "normal": 10,
+    "suspicious": 55,
+    "super_suspicious": 90,
+}
 
 STAFF_ACCOUNTS = {
     "Admin": {
@@ -456,6 +463,51 @@ def _random_transaction_amount(tx_type):
     return random.choice([50, 100, 250, 450, 1000, 3000, 9999, 10000])
 
 
+def _simulation_plan(count):
+    normal_count = int(count * 0.80)
+    suspicious_count = int(count * 0.15)
+    super_count = count - normal_count - suspicious_count
+    labels = (
+        ["normal"] * normal_count
+        + ["suspicious"] * suspicious_count
+        + ["super_suspicious"] * super_count
+    )
+    random.shuffle(labels)
+    return labels
+
+
+def _simulation_transaction(label, users):
+    if label == "normal":
+        tx_type = random.choices(["deposit", "withdraw", "transfer"], weights=[35, 25, 40], k=1)[0]
+        amount = round(random.uniform(10, 950), 2)
+        hour = random.randint(7, 20)
+    elif label == "suspicious":
+        tx_type = random.choices(["transfer", "withdraw", "deposit"], weights=[70, 20, 10], k=1)[0]
+        amount = round(random.uniform(1200, 6500), 2)
+        hour = random.choice([0, 1, 2, 3, 4, 22, 23, random.randint(6, 21)])
+    else:
+        tx_type = random.choices(["transfer", "withdraw", "deposit"], weights=[75, 20, 5], k=1)[0]
+        amount = round(random.uniform(8500, 25000), 2)
+        hour = random.choice([0, 1, 2, 3, 23])
+
+    sender = random.choice(users)
+    recipient = sender
+    if tx_type == "transfer" and len(users) > 1:
+        recipient = random.choice([user for user in users if user["id"] != sender["id"]])
+
+    now = datetime.now(timezone.utc)
+    timestamp = now.replace(hour=hour, minute=random.randint(0, 59), second=random.randint(0, 59)).isoformat()
+    return sender, recipient, tx_type, amount, timestamp
+
+
+def _simulation_reason(label, amount, tx_type):
+    if label == "normal":
+        return "AI training label: normal customer banking activity"
+    if label == "suspicious":
+        return f"AI training label: suspicious {tx_type} pattern involving ${amount:,.2f}"
+    return f"AI training label: super suspicious {tx_type} pattern involving ${amount:,.2f}"
+
+
 def create_alert_if_needed(conn, transaction_id, account_number, risk_score, risk_level, reason, rules_json, timestamp):
     existing = conn.execute("SELECT id FROM alerts WHERE transaction_id=?", (transaction_id,)).fetchone()
     if existing is None and risk_level != "normal":
@@ -493,8 +545,22 @@ def process_transaction_event(
         for r in triggered
     ])
 
+    ai_level, ai_confidence = predict_risk_level({
+        "sender_account": sender_account,
+        "receiver_account": receiver_account,
+        "amount": amount,
+        "transaction_type": transaction_type,
+        "timestamp": timestamp,
+    })
+    if ai_level and ai_confidence >= 0.55:
+        risk_level = ai_level
+        risk_score = AI_RISK_SCORES.get(ai_level, risk_score)
+        reason = f"AI model classified transaction as {ai_level.replace('_', ' ')} ({ai_confidence:.0%} confidence)"
+
     ctr_required = 1 if "[CTR REQUIRED]" in reason else 0
     sar_required = 1 if "[SAR REVIEW]" in reason else 0
+    if risk_level in ("suspicious", "super_suspicious", "high_risk", "critical"):
+        sar_required = 1
 
     conn.execute(
         """
@@ -913,6 +979,7 @@ def create_transaction():
         "normal": "Transaction processed successfully.",
         "low": "Transaction processed. Minor risk indicators noted.",
         "suspicious": "⚠ Transaction flagged as suspicious and is under review.",
+        "super_suspicious": "🚨 Super suspicious transaction flagged. Immediate compliance review initiated.",
         "high_risk": "🚨 High-risk transaction flagged. Compliance team notified.",
         "critical": "🚨 CRITICAL risk transaction. Immediate review initiated.",
     }
@@ -932,7 +999,7 @@ def compliance_dashboard():
     if filter_value == "flagged":
         base = "WHERE risk_level!='normal'"
     elif filter_value == "suspicious":
-        base = "WHERE risk_level IN ('suspicious','high_risk','critical')"
+        base = "WHERE risk_level IN ('suspicious','super_suspicious','high_risk','critical')"
     elif filter_value == "ctr":
         base = "WHERE ctr_required=1"
     elif filter_value == "sar":
@@ -961,7 +1028,7 @@ def compliance_dashboard():
     stats = {
         "open_alerts": get_db().execute("SELECT COUNT(*) as c FROM alerts WHERE status='open'").fetchone()["c"],
         "high_risk_today": get_db().execute(
-            "SELECT COUNT(*) as c FROM transactions WHERE risk_level IN ('high_risk','critical') AND timestamp>=?",
+            "SELECT COUNT(*) as c FROM transactions WHERE risk_level IN ('super_suspicious','high_risk','critical') AND timestamp>=?",
             (datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00"),),
         ).fetchone()["c"],
         "pending_sars": pending_sars,
@@ -1137,7 +1204,8 @@ def generate_transactions():
         count = int(request.form.get("count", 100))
     except ValueError:
         count = 100
-    count = max(1, min(count, 1000))
+    if count not in (100, 1000, 5000):
+        count = 100
 
     users = get_db().execute(
         "SELECT id, username, account_number FROM users ORDER BY id"
@@ -1146,39 +1214,37 @@ def generate_transactions():
         flash("No users are available for transaction generation.")
         return redirect(url_for("admin_dashboard"))
 
-    generated = 0
-    tx_types = ["deposit", "withdraw", "transfer"]
-    for _ in range(count):
-        sender = random.choice(users)
-        tx_type = random.choice(tx_types if len(users) > 1 else ["deposit", "withdraw"])
-        recipient = sender
-        if tx_type == "transfer":
-            recipient = random.choice([user for user in users if user["id"] != sender["id"]])
-
-        amount = float(_random_transaction_amount(tx_type))
+    generated = {"normal": 0, "suspicious": 0, "super_suspicious": 0}
+    for label in _simulation_plan(count):
+        sender, recipient, tx_type, amount, timestamp = _simulation_transaction(label, users)
         sender_account = sender["account_number"]
         receiver_account = recipient["account_number"] if tx_type == "transfer" else sender_account
-        timestamp = datetime.now(timezone.utc).isoformat()
+        risk_score = AI_RISK_SCORES[label]
+        reason = _simulation_reason(label, amount, tx_type)
+        rules_json = json.dumps([{
+            "id": "AI_SIM",
+            "typology": label.replace("_", " ").title(),
+            "score_delta": risk_score,
+            "reason": reason,
+        }])
+        ctr_required = 1 if tx_type in ("deposit", "withdraw") and amount >= 10000 else 0
+        sar_required = 1 if label != "normal" else 0
 
         get_db().execute(
             """
             INSERT INTO transactions (sender_account, receiver_account, amount, transaction_type,
-                currency, channel, timestamp, status, risk_score, risk_level, description)
-            VALUES (?,?,?,?,'USD','simulator',?,'Completed',0,'normal','Generated by simulator')
+                currency, channel, timestamp, status, risk_score, risk_level, description,
+                rules_triggered, ctr_required, sar_required)
+            VALUES (?,?,?,?,'USD','simulator',?,'Completed',?,?,?,?,?,?)
             """,
-            (sender_account, receiver_account, amount, tx_type, timestamp),
+            (
+                sender_account, receiver_account, amount, tx_type, timestamp,
+                risk_score, label, reason, rules_json, ctr_required, sar_required,
+            ),
         )
         transaction_id = get_last_insert_id(get_db())
-        process_transaction_event(
-            get_db(),
-            transaction_id,
-            sender_account,
-            receiver_account,
-            amount,
-            tx_type,
-            timestamp,
-            account_number=sender_account,
-            emit_events=False,
+        create_alert_if_needed(
+            get_db(), transaction_id, sender_account, risk_score, label, reason, rules_json, timestamp
         )
 
         if tx_type == "deposit":
@@ -1195,11 +1261,45 @@ def generate_transactions():
             )
             get_db().execute("UPDATE users SET balance=balance+? WHERE id=?", (amount, recipient["id"]))
 
-        generated += 1
+        generated[label] += 1
 
     get_db().commit()
-    record_activity(admin_user["username"], "generate_transactions", f"Generated {generated} simulator transactions")
-    flash(f"Generated {generated} transactions.")
+    rows = get_db().execute(
+        "SELECT sender_account, receiver_account, amount, transaction_type, timestamp, risk_level FROM transactions"
+    ).fetchall()
+    model = train_ai_model(rows)
+    record_activity(
+        admin_user["username"],
+        "generate_transactions",
+        (
+            f"Generated {count} simulator transactions: "
+            f"{generated['normal']} normal, {generated['suspicious']} suspicious, "
+            f"{generated['super_suspicious']} super suspicious"
+        ),
+    )
+    if model is None:
+        flash("Transactions generated, but more labelled data is needed before AI training can complete.")
+    else:
+        flash(
+            f"Generated {count} transactions and trained AI model: "
+            f"{generated['normal']} normal, {generated['suspicious']} suspicious, "
+            f"{generated['super_suspicious']} super suspicious."
+        )
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/admin/clear-transactions", methods=["POST"])
+@login_required("admin")
+def clear_transactions():
+    admin_user = get_user_by_id(session["user_id"])
+    conn = get_db()
+    for table in ("sar_reports", "ctr_reports", "alerts", "transactions"):
+        conn.execute(f"DELETE FROM {table}")
+    conn.commit()
+    delete_ai_model()
+    app.config["LAST_MONITORED_TRANSACTION_ID"] = 0
+    record_activity(admin_user["username"], "clear_transactions", "Cleared all transactions, alerts, and AI model")
+    flash("All transactions, alerts, reports, and the trained AI model have been cleared.")
     return redirect(url_for("admin_dashboard"))
 
 
@@ -1254,7 +1354,7 @@ def api_stats():
         "total_transactions": get_db().execute("SELECT COUNT(*) as c FROM transactions").fetchone()["c"],
         "open_alerts": get_db().execute("SELECT COUNT(*) as c FROM alerts WHERE status='open'").fetchone()["c"],
         "high_risk_today": get_db().execute(
-            "SELECT COUNT(*) as c FROM transactions WHERE risk_level IN ('high_risk','critical') AND timestamp>=?",
+            "SELECT COUNT(*) as c FROM transactions WHERE risk_level IN ('super_suspicious','high_risk','critical') AND timestamp>=?",
             (datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00"),),
         ).fetchone()["c"],
         "pending_sars": get_db().execute("SELECT COUNT(*) as c FROM sar_reports WHERE status='draft'").fetchone()["c"],

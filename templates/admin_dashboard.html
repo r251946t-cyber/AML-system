@@ -14,12 +14,18 @@
 
         <select name="count">
             <option value="100">100</option>
-            <option value="500">500</option>
             <option value="1000">1000</option>
+            <option value="5000">5000</option>
         </select>
 
         <button type="submit">
             Generate Transactions
+        </button>
+    </form>
+
+    <form method="post" action="{{ url_for('clear_transactions') }}">
+        <button type="submit">
+            Clear All Transactions
         </button>
     </form>
 </div>

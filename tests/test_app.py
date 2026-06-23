@@ -4,6 +4,7 @@ from queue import Queue
 
 import pytest
 
+import ai_detector
 import app as aml_app
 
 
@@ -23,7 +24,10 @@ def client():
         with aml_app.app.app_context():
             aml_app.init_db()
             aml_app.seed_demo_data()
+            aml_app.delete_ai_model()
         yield client
+        with aml_app.app.app_context():
+            aml_app.delete_ai_model()
 
 
 def test_health_endpoint(client):
@@ -316,3 +320,68 @@ def test_registration_cannot_create_staff_role(client):
     with aml_app.app.app_context():
         user = aml_app.get_user_by_username("fakeofficer")
         assert user["role"] == "customer"
+
+
+def test_admin_generates_simulated_transactions_and_trains_ai(client):
+    client.post(
+        "/login",
+        data={"login": "Admin", "password": "Admin123"},
+        follow_redirects=True,
+    )
+
+    response = client.post(
+        "/admin/generate-transactions",
+        data={"count": "100"},
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert b"Generated 100 transactions" in response.data
+    with aml_app.app.app_context():
+        conn = aml_app.get_db()
+        total = conn.execute("SELECT COUNT(*) as c FROM transactions").fetchone()["c"]
+        normal = conn.execute(
+            "SELECT COUNT(*) as c FROM transactions WHERE risk_level='normal'"
+        ).fetchone()["c"]
+        suspicious = conn.execute(
+            "SELECT COUNT(*) as c FROM transactions WHERE risk_level='suspicious'"
+        ).fetchone()["c"]
+        super_suspicious = conn.execute(
+            "SELECT COUNT(*) as c FROM transactions WHERE risk_level='super_suspicious'"
+        ).fetchone()["c"]
+        alerts = conn.execute("SELECT COUNT(*) as c FROM alerts").fetchone()["c"]
+        simulator_rows = conn.execute(
+            "SELECT COUNT(*) as c FROM transactions WHERE channel='simulator'"
+        ).fetchone()["c"]
+
+    assert total == 100
+    assert normal == 80
+    assert suspicious == 15
+    assert super_suspicious == 5
+    assert alerts == 20
+    assert simulator_rows == 100
+    assert os.path.exists(ai_detector.MODEL_PATH)
+
+
+def test_admin_clears_transactions_reports_alerts_and_ai_model(client):
+    client.post(
+        "/login",
+        data={"login": "Admin", "password": "Admin123"},
+        follow_redirects=True,
+    )
+    client.post(
+        "/admin/generate-transactions",
+        data={"count": "100"},
+        follow_redirects=True,
+    )
+    assert os.path.exists(ai_detector.MODEL_PATH)
+
+    response = client.post("/admin/clear-transactions", follow_redirects=True)
+
+    assert response.status_code == 200
+    assert b"trained AI model have been cleared" in response.data
+    with aml_app.app.app_context():
+        conn = aml_app.get_db()
+        for table in ("transactions", "alerts", "sar_reports", "ctr_reports"):
+            assert conn.execute(f"SELECT COUNT(*) as c FROM {table}").fetchone()["c"] == 0
+    assert not os.path.exists(ai_detector.MODEL_PATH)
