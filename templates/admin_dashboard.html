@@ -141,14 +141,37 @@
     prependActivity(`${model.timestamp} • ai_model • ${model.trained ? 'trained' : 'waiting for more labels'} on ${model.training_rows} rows`);
   };
 
+  const setBalance = (event) => {
+    const cell = balanceCell(event.account_number);
+    if (cell) cell.textContent = `$${money(event.balance)}`;
+  };
+  const handleReset = () => {
+    transactions.replaceChildren();
+    prependActivity('System reset: transactions, alerts, reports, and AI model cleared');
+  };
+  const handleBatch = (batch) => {
+    prependActivity(`${batch.timestamp} - transaction_batch - generated ${batch.count} transactions`);
+  };
+  const handleActivity = (event) => {
+    prependActivity(`${event.timestamp} - ${event.action} - ${event.detail}`);
+  };
+
   if (window.io) {
     const socket = io({ transports: ['websocket', 'polling'] });
     socket.on('transaction', prependTransaction);
     socket.on('ai_model', handleAiModel);
+    socket.on('balance', setBalance);
+    socket.on('activity', handleActivity);
+    socket.on('transaction_batch', handleBatch);
+    socket.on('reset', handleReset);
   } else if (window.EventSource) {
     const source = new EventSource('/stream');
     source.addEventListener('transaction', (event) => prependTransaction(JSON.parse(event.data)));
     source.addEventListener('ai_model', (event) => handleAiModel(JSON.parse(event.data)));
+    source.addEventListener('balance', (event) => setBalance(JSON.parse(event.data)));
+    source.addEventListener('activity', (event) => handleActivity(JSON.parse(event.data)));
+    source.addEventListener('transaction_batch', (event) => handleBatch(JSON.parse(event.data)));
+    source.addEventListener('reset', () => handleReset());
   }
 </script>
 {% endblock %}

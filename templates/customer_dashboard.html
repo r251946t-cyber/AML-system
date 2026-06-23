@@ -114,6 +114,20 @@
     if (type === 'transfer' && txn.receiver_account === accountNumber) current += amount;
     balance.textContent = `$${money(current)}`;
   };
+  const setBalance = (event) => {
+    if (!balance || event.account_number !== accountNumber) return;
+    balance.textContent = `$${money(event.balance)}`;
+  };
+  const handleAlertUpdate = (alert) => {
+    if (alert.account_number !== accountNumber) return;
+    addFeedItem(`Alert status â€¢ #${alert.id} â€¢ ${alert.status}`);
+  };
+  const handleReset = () => {
+    transactions.replaceChildren();
+    alerts.replaceChildren();
+    feed.replaceChildren();
+    status.textContent = 'Live reset received â€¢ stream active';
+  };
 
   const handleTransaction = (txn) => {
     prependTransaction(txn);
@@ -135,13 +149,19 @@
       status.textContent = 'Connected • WebSocket live stream active';
     });
     socket.on('alert', handleAlert);
+    socket.on('alert_update', handleAlertUpdate);
     socket.on('transaction', handleTransaction);
     socket.on('ai_model', handleAiModel);
+    socket.on('balance', setBalance);
+    socket.on('reset', handleReset);
   } else if (window.EventSource) {
     const source = new EventSource('/stream');
     source.addEventListener('alert', (event) => handleAlert(JSON.parse(event.data)));
+    source.addEventListener('alert_update', (event) => handleAlertUpdate(JSON.parse(event.data)));
     source.addEventListener('transaction', (event) => handleTransaction(JSON.parse(event.data)));
     source.addEventListener('ai_model', (event) => handleAiModel(JSON.parse(event.data)));
+    source.addEventListener('balance', (event) => setBalance(JSON.parse(event.data)));
+    source.addEventListener('reset', () => handleReset());
   }
 </script>
 {% endblock %}

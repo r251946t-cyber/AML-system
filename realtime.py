@@ -28,7 +28,12 @@ class RealtimeBroker:
         redis_url = os.environ.get("REDIS_URL")
         if redis_url and redis is not None:
             try:
-                self._redis_client = redis.from_url(redis_url, decode_responses=True)
+                self._redis_client = redis.from_url(
+                    redis_url,
+                    decode_responses=True,
+                    socket_connect_timeout=0.5,
+                    socket_timeout=0.5,
+                )
                 self._redis_client.ping()
             except Exception:
                 self._redis_client = None
@@ -38,6 +43,9 @@ class RealtimeBroker:
             try:
                 self._kafka_producer = KafkaProducer(
                     bootstrap_servers=[server.strip() for server in kafka_bootstrap.split(",") if server.strip()],
+                    api_version_auto_timeout_ms=500,
+                    request_timeout_ms=1000,
+                    max_block_ms=1000,
                     value_serializer=lambda value: json.dumps(value).encode("utf-8"),
                 )
             except Exception:
@@ -56,14 +64,13 @@ class RealtimeBroker:
 
     def publish(self, event_name, payload):
         message = {"event": event_name, "data": payload}
-        for subscriber in list(self._subscribers):
-            try:
-                subscriber.put_nowait(message)
-            except Exception:
-                pass
-
+        delivered = set()
         app_subscribers = self.app.config.get("STREAM_SUBSCRIBERS", []) if self.app is not None else []
-        for subscriber in list(app_subscribers):
+        for subscriber in list(self._subscribers) + list(app_subscribers):
+            subscriber_id = id(subscriber)
+            if subscriber_id in delivered:
+                continue
+            delivered.add(subscriber_id)
             try:
                 subscriber.put_nowait(message)
             except Exception:
@@ -92,14 +99,22 @@ class RealtimeBroker:
         self.add_subscriber(queue)
 
         def generate():
-            yield ": connected\n\n"
-            while True:
-                try:
-                    message = queue.get(timeout=1)
-                except Empty:
-                    yield ": heartbeat\n\n"
-                    continue
-                yield f"event: {message['event']}\n"
-                yield f"data: {json.dumps(message['data'])}\n\n"
+            try:
+                yield ": connected\n\n"
+                while True:
+                    try:
+                        message = queue.get(timeout=1)
+                    except Empty:
+                        yield ": heartbeat\n\n"
+                        continue
+                    yield f"event: {message['event']}\n"
+                    yield f"data: {json.dumps(message['data'])}\n\n"
+            finally:
+                if queue in self._subscribers:
+                    self._subscribers.remove(queue)
+                if self.app is not None:
+                    app_subscribers = self.app.config.get("STREAM_SUBSCRIBERS", [])
+                    if queue in app_subscribers:
+                        app_subscribers.remove(queue)
 
         return Response(generate(), mimetype="text/event-stream")

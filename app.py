@@ -476,11 +476,19 @@ def is_valid_id_number(id_number):
 
 def record_activity(actor, action, detail):
     ip = request.remote_addr if request else "system"
+    timestamp = datetime.now(timezone.utc).isoformat()
     get_db().execute(
         "INSERT INTO activity_log (actor, action, detail, ip_address, timestamp) VALUES (?,?,?,?,?)",
-        (actor, action, detail, ip, datetime.now(timezone.utc).isoformat()),
+        (actor, action, detail, ip, timestamp),
     )
     get_db().commit()
+    broadcast_event("activity", {
+        "actor": actor,
+        "action": action,
+        "detail": detail,
+        "ip_address": ip,
+        "timestamp": timestamp,
+    })
 
 def get_last_insert_id(conn):
     if is_postgres_database_url(app.config["DATABASE"]):
@@ -491,6 +499,83 @@ def get_last_insert_id(conn):
 
 def broadcast_event(event_name, payload):
     app.extensions["realtime_broker"].publish(event_name, payload)
+
+
+def _stats_payload(conn):
+    today_start = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00")
+    return {
+        "total_transactions": conn.execute("SELECT COUNT(*) as c FROM transactions").fetchone()["c"],
+        "suspicious_transactions": conn.execute(
+            "SELECT COUNT(*) as c FROM transactions WHERE risk_level!='normal'"
+        ).fetchone()["c"],
+        "open_alerts": conn.execute("SELECT COUNT(*) as c FROM alerts WHERE status='open'").fetchone()["c"],
+        "high_risk_today": conn.execute(
+            "SELECT COUNT(*) as c FROM transactions WHERE risk_level IN ('super_suspicious','high_risk','critical') AND timestamp>=?",
+            (today_start,),
+        ).fetchone()["c"],
+        "pending_sars": conn.execute("SELECT COUNT(*) as c FROM sar_reports WHERE status='draft'").fetchone()["c"],
+        "pending_ctrs": conn.execute("SELECT COUNT(*) as c FROM ctr_reports WHERE status='pending'").fetchone()["c"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def broadcast_stats(conn=None):
+    conn = conn or get_db()
+    broadcast_event("stats", _stats_payload(conn))
+
+
+def _user_balance_payload(row):
+    return {
+        "user_id": row["id"],
+        "username": row["username"],
+        "account_number": row["account_number"],
+        "balance": float(row["balance"] or 0),
+        "kyc_status": row["kyc_status"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def broadcast_user_balance(conn, account_number):
+    row = conn.execute(
+        "SELECT id, username, account_number, balance, kyc_status FROM users WHERE account_number=?",
+        (account_number,),
+    ).fetchone()
+    if row:
+        broadcast_event("balance", _user_balance_payload(row))
+
+
+def broadcast_alert_update(conn, alert_id, event_name="alert_update"):
+    row = conn.execute("SELECT * FROM alerts WHERE id=?", (alert_id,)).fetchone()
+    if row:
+        broadcast_event(event_name, {
+            "id": row["id"],
+            "transaction_id": row["transaction_id"],
+            "account_number": row["account_number"],
+            "risk_score": float(row["risk_score"] or 0),
+            "risk_level": row["risk_level"],
+            "reason": row["reason"],
+            "status": row["status"],
+            "assigned_to": row["assigned_to"],
+            "resolved_by": row["resolved_by"],
+            "resolved_at": row["resolved_at"],
+            "timestamp": row["timestamp"],
+        })
+
+
+def _json_safe(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def broadcast_report_event(kind, row):
+    broadcast_event(kind, {
+        key: _json_safe(row[key])
+        for key in row.keys()
+    })
 
 def _generate_sar_ref():
     ts = datetime.now(timezone.utc)
@@ -883,6 +968,7 @@ def process_transaction_event(
     )
 
     # Auto-generate CTR
+    ctr_id = None
     if ctr_required:
         existing_ctr = conn.execute(
             "SELECT id FROM ctr_reports WHERE transaction_id=?", (transaction_id,)
@@ -897,6 +983,7 @@ def process_transaction_event(
                 (transaction_id, account_number or sender_account, amount,
                  datetime.now(timezone.utc).isoformat()),
             )
+            ctr_id = get_last_insert_id(conn)
 
     if emit_events:
         tx_row = conn.execute("SELECT * FROM transactions WHERE id=?", (transaction_id,)).fetchone()
@@ -912,6 +999,11 @@ def process_transaction_event(
                 "reason": reason,
                 "timestamp": timestamp,
             })
+        if ctr_required and ctr_id:
+            row = conn.execute("SELECT * FROM ctr_reports WHERE id=?", (ctr_id,)).fetchone()
+            if row:
+                broadcast_report_event("ctr_report", row)
+        broadcast_stats(conn)
 
     return risk_score, risk_level, reason, created_alert
 
@@ -1282,6 +1374,10 @@ def create_transaction():
         get_db().execute("UPDATE users SET balance=balance+? WHERE id=?", (amount, recipient_user["id"]))
 
     get_db().commit()
+    broadcast_user_balance(get_db(), sender_account)
+    if tx_type == "transfer":
+        broadcast_user_balance(get_db(), receiver_account)
+    broadcast_stats(get_db())
     _train_ai_model_from_db(get_db())
     record_activity(user["username"], f"{tx_type}", f"${amount:.2f} — risk: {risk_level}")
 
@@ -1409,6 +1505,15 @@ def alert_detail(alert_id):
             flash(f"SAR filed successfully. Reference: {ref}")
 
         get_db().commit()
+        broadcast_alert_update(get_db(), alert_id)
+        if action == "file_sar":
+            sar = get_db().execute(
+                "SELECT * FROM sar_reports WHERE alert_id=? ORDER BY id DESC LIMIT 1",
+                (alert_id,),
+            ).fetchone()
+            if sar:
+                broadcast_report_event("sar_report", sar)
+        broadcast_stats(get_db())
         return redirect(url_for("alert_detail", alert_id=alert_id))
 
     rules = []
@@ -1435,11 +1540,16 @@ def alert_detail(alert_id):
 @login_required("compliance", "admin")
 def submit_sar(sar_id):
     officer = get_user_by_id(session["user_id"])
+    filed_at = datetime.now(timezone.utc).isoformat()
     get_db().execute(
         "UPDATE sar_reports SET status='submitted', filed_at=? WHERE id=?",
-        (datetime.now(timezone.utc).isoformat(), sar_id),
+        (filed_at, sar_id),
     )
     get_db().commit()
+    sar = get_db().execute("SELECT * FROM sar_reports WHERE id=?", (sar_id,)).fetchone()
+    if sar:
+        broadcast_report_event("sar_report", sar)
+    broadcast_stats(get_db())
     record_activity(officer["username"], "submit_sar", f"SAR #{sar_id} submitted to FIU")
     flash(f"SAR #{sar_id} submitted to the Financial Intelligence Unit.")
     return redirect(url_for("reports"))
@@ -1461,6 +1571,12 @@ def admin_dashboard():
                 if kyc:
                     get_db().execute("UPDATE users SET kyc_status=? WHERE id=?", (kyc, user_id))
                 get_db().commit()
+                updated = get_db().execute(
+                    "SELECT id, username, account_number, balance, kyc_status FROM users WHERE id=?",
+                    (user_id,),
+                ).fetchone()
+                if updated:
+                    broadcast_event("user", _user_balance_payload(updated))
                 record_activity(admin_user["username"], "update_user", f"Updated user {user_id}: kyc={kyc or 'unchanged'}")
                 flash("User updated.")
 
@@ -1476,6 +1592,11 @@ def admin_dashboard():
                      datetime.now(timezone.utc).isoformat()),
                 )
                 get_db().commit()
+                watchlist = get_db().execute(
+                    "SELECT * FROM watchlist ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                if watchlist:
+                    broadcast_report_event("watchlist", watchlist)
                 record_activity(admin_user["username"], "add_watchlist", f"Added {name} to watchlist")
                 flash(f"{name} added to watchlist.")
 
@@ -1573,7 +1694,6 @@ def generate_transactions():
                 "reason": reason,
                 "timestamp": timestamp,
             })
-
         if tx_type == "deposit":
             get_db().execute("UPDATE users SET balance=balance+? WHERE id=?", (amount, sender["id"]))
         elif tx_type == "withdraw":
@@ -1591,6 +1711,18 @@ def generate_transactions():
         generated[label] += 1
 
     get_db().commit()
+    for user_row in get_db().execute(
+        "SELECT account_number FROM users ORDER BY id"
+    ).fetchall():
+        broadcast_user_balance(get_db(), user_row["account_number"])
+    broadcast_event("transaction_batch", {
+        "count": count,
+        "normal": generated["normal"],
+        "suspicious": generated["suspicious"],
+        "super_suspicious": generated["super_suspicious"],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    broadcast_stats(get_db())
     model = _train_ai_model_from_db(get_db())
     record_activity(
         admin_user["username"],
@@ -1622,6 +1754,11 @@ def clear_transactions():
     conn.commit()
     delete_ai_model()
     app.config["LAST_MONITORED_TRANSACTION_ID"] = 0
+    broadcast_event("reset", {
+        "scope": "transactions",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    broadcast_stats(conn)
     record_activity(admin_user["username"], "clear_transactions", "Cleared all transactions, alerts, and AI model")
     flash("All transactions, alerts, reports, and the trained AI model have been cleared.")
     return redirect(url_for("admin_dashboard"))
@@ -1674,16 +1811,7 @@ def reports():
 @app.route("/api/v1/stats")
 @login_required("compliance", "admin")
 def api_stats():
-    return jsonify({
-        "total_transactions": get_db().execute("SELECT COUNT(*) as c FROM transactions").fetchone()["c"],
-        "open_alerts": get_db().execute("SELECT COUNT(*) as c FROM alerts WHERE status='open'").fetchone()["c"],
-        "high_risk_today": get_db().execute(
-            "SELECT COUNT(*) as c FROM transactions WHERE risk_level IN ('super_suspicious','high_risk','critical') AND timestamp>=?",
-            (datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00"),),
-        ).fetchone()["c"],
-        "pending_sars": get_db().execute("SELECT COUNT(*) as c FROM sar_reports WHERE status='draft'").fetchone()["c"],
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    return jsonify(_stats_payload(get_db()))
 
 
 @app.route("/api/v1/transactions")

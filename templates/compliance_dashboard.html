@@ -33,7 +33,7 @@
     <h3>Alerts</h3>
     <ul id="compliance-alerts">
       {% for alert in open_alerts %}
-        <li>Alert #{{ alert.id }} | Tx #{{ alert.transaction_id }} | {{ alert.timestamp }} | {{ alert.account_number }} | <span class="status-pill alert">{{ alert.risk_level }}</span> | {{ alert.reason }}</li>
+        <li data-alert-id="{{ alert.id }}">Alert #{{ alert.id }} | Tx #{{ alert.transaction_id }} | {{ alert.timestamp }} | {{ alert.account_number }} | <span class="status-pill alert">{{ alert.risk_level }}</span> | {{ alert.reason }}</li>
       {% endfor %}
     </ul>
   </div>
@@ -86,9 +86,21 @@
   };
   const prependAlert = (alert) => {
     const item = document.createElement('li');
+    item.dataset.alertId = alert.id || '';
     item.innerHTML = `Alert #${escapeHtml(alert.id || '')} | Tx #${escapeHtml(alert.transaction_id)} | ${escapeHtml(alert.timestamp)} | ${escapeHtml(alert.account_number)} | <span class="status-pill alert">${escapeHtml(alert.risk_level)}</span> | ${escapeHtml(alert.reason)}`;
     alerts.prepend(item);
     trimList(alerts, 30);
+  };
+  const handleAlertUpdate = (alert) => {
+    const existing = document.querySelector(`[data-alert-id="${CSS.escape(String(alert.id || ''))}"]`);
+    if (alert.status !== 'open') {
+      if (existing) existing.remove();
+    } else if (existing) {
+      existing.innerHTML = `Alert #${escapeHtml(alert.id || '')} | Tx #${escapeHtml(alert.transaction_id)} | ${escapeHtml(alert.timestamp)} | ${escapeHtml(alert.account_number)} | <span class="status-pill alert">${escapeHtml(alert.risk_level)}</span> | ${escapeHtml(alert.reason)}`;
+    } else {
+      prependAlert(alert);
+    }
+    addFeedItem(`Alert status | #${alert.id} | ${alert.status}`);
   };
   const handleTransaction = (txn) => {
     prependTransaction(txn);
@@ -102,6 +114,18 @@
   const handleAiModel = (model) => {
     addFeedItem(`AI model | ${model.trained ? 'trained' : 'waiting for more labels'} | ${model.training_rows} rows`);
   };
+  const handleReport = (report) => {
+    addFeedItem(`Report | #${report.id} | ${report.status || 'created'}`);
+  };
+  const handleBatch = (batch) => {
+    addFeedItem(`Batch | generated ${batch.count} transactions`);
+  };
+  const handleReset = () => {
+    transactions.replaceChildren();
+    alerts.replaceChildren();
+    feed.replaceChildren();
+    status.textContent = 'Reset received | stream active';
+  };
 
   if (window.io) {
     const socket = io({ transports: ['websocket', 'polling'] });
@@ -110,12 +134,22 @@
     });
     socket.on('transaction', handleTransaction);
     socket.on('alert', handleAlert);
+    socket.on('alert_update', handleAlertUpdate);
     socket.on('ai_model', handleAiModel);
+    socket.on('sar_report', handleReport);
+    socket.on('ctr_report', handleReport);
+    socket.on('transaction_batch', handleBatch);
+    socket.on('reset', handleReset);
   } else if (window.EventSource) {
     const source = new EventSource('/stream');
     source.addEventListener('transaction', (event) => handleTransaction(JSON.parse(event.data)));
     source.addEventListener('alert', (event) => handleAlert(JSON.parse(event.data)));
+    source.addEventListener('alert_update', (event) => handleAlertUpdate(JSON.parse(event.data)));
     source.addEventListener('ai_model', (event) => handleAiModel(JSON.parse(event.data)));
+    source.addEventListener('sar_report', (event) => handleReport(JSON.parse(event.data)));
+    source.addEventListener('ctr_report', (event) => handleReport(JSON.parse(event.data)));
+    source.addEventListener('transaction_batch', (event) => handleBatch(JSON.parse(event.data)));
+    source.addEventListener('reset', () => handleReset());
   }
 </script>
 {% endblock %}
