@@ -1,6 +1,7 @@
 import os
 import tempfile
 from queue import Queue
+from types import SimpleNamespace
 
 import pytest
 
@@ -233,6 +234,38 @@ def test_transaction_processing_emits_live_events(client):
 
         event = queue.get_nowait()
         assert event["event"] == "transaction"
+
+
+def test_ai_can_soften_non_mandatory_rule_risk():
+    score, level, reason, ai_reason = aml_app._combine_rule_ai_risk(
+        45,
+        "suspicious",
+        "High-value transfer monitoring threshold",
+        [SimpleNamespace(rule_id="R12")],
+        "normal",
+        0.92,
+    )
+
+    assert score == 20
+    assert level == "normal"
+    assert "recognized this as normal" in reason
+    assert "normal" in ai_reason
+
+
+def test_ai_cannot_suppress_mandatory_compliance_risk():
+    score, level, reason, ai_reason = aml_app._combine_rule_ai_risk(
+        65,
+        "high_risk",
+        "[SAR REVIEW] Transfer meets SAR auto-review threshold",
+        [SimpleNamespace(rule_id="R09")],
+        "normal",
+        0.95,
+    )
+
+    assert score == 65
+    assert level == "high_risk"
+    assert "[SAR REVIEW]" in reason
+    assert "normal" in ai_reason
 
 
 def test_reports_show_alert_history(client):

@@ -9,6 +9,17 @@ from sklearn.preprocessing import StandardScaler
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "aml_ai_model.pkl")
 LABELS = ("normal", "suspicious", "super_suspicious")
+PROFILE_FEATURE_DEFAULTS = {
+    "sender_avg_amount": 0.0,
+    "sender_max_amount": 0.0,
+    "sender_tx_count": 0.0,
+    "amount_to_sender_avg": 1.0,
+    "amount_to_sender_max": 1.0,
+    "sender_tx_count_24h": 0.0,
+    "sender_volume_24h": 0.0,
+    "amount_to_sender_volume_24h": 1.0,
+    "is_new_recipient": 0.0,
+}
 
 
 def _timestamp_hour(timestamp):
@@ -18,12 +29,21 @@ def _timestamp_hour(timestamp):
         return 12
 
 
+def _value(transaction, key, default=None):
+    try:
+        if hasattr(transaction, "get"):
+            return transaction.get(key, default)
+        return transaction[key]
+    except (KeyError, TypeError):
+        return default
+
+
 def transaction_features(transaction):
-    tx_type = transaction["transaction_type"]
-    sender = transaction["sender_account"]
-    receiver = transaction["receiver_account"]
-    timestamp = transaction["timestamp"]
-    amount = float(transaction["amount"])
+    tx_type = _value(transaction, "transaction_type", "")
+    sender = _value(transaction, "sender_account", "")
+    receiver = _value(transaction, "receiver_account", "")
+    timestamp = _value(transaction, "timestamp", "")
+    amount = float(_value(transaction, "amount", 0))
     hour = _timestamp_hour(timestamp)
 
     return [
@@ -34,6 +54,15 @@ def transaction_features(transaction):
         1 if tx_type == "transfer" else 0,
         1 if sender == receiver else 0,
         1 if hour < 5 or hour >= 23 else 0,
+        float(_value(transaction, "sender_avg_amount", PROFILE_FEATURE_DEFAULTS["sender_avg_amount"]) or 0),
+        float(_value(transaction, "sender_max_amount", PROFILE_FEATURE_DEFAULTS["sender_max_amount"]) or 0),
+        float(_value(transaction, "sender_tx_count", PROFILE_FEATURE_DEFAULTS["sender_tx_count"]) or 0),
+        float(_value(transaction, "amount_to_sender_avg", PROFILE_FEATURE_DEFAULTS["amount_to_sender_avg"]) or 0),
+        float(_value(transaction, "amount_to_sender_max", PROFILE_FEATURE_DEFAULTS["amount_to_sender_max"]) or 0),
+        float(_value(transaction, "sender_tx_count_24h", PROFILE_FEATURE_DEFAULTS["sender_tx_count_24h"]) or 0),
+        float(_value(transaction, "sender_volume_24h", PROFILE_FEATURE_DEFAULTS["sender_volume_24h"]) or 0),
+        float(_value(transaction, "amount_to_sender_volume_24h", PROFILE_FEATURE_DEFAULTS["amount_to_sender_volume_24h"]) or 0),
+        float(_value(transaction, "is_new_recipient", PROFILE_FEATURE_DEFAULTS["is_new_recipient"]) or 0),
     ]
 
 
@@ -72,7 +101,11 @@ def predict_risk_level(transaction):
     if model is None:
         return None, 0.0
 
-    probabilities = model.predict_proba([transaction_features(transaction)])[0]
+    try:
+        probabilities = model.predict_proba([transaction_features(transaction)])[0]
+    except ValueError:
+        delete_ai_model()
+        return None, 0.0
     classes = list(model.classes_)
     best_index = int(probabilities.argmax())
     return classes[best_index], float(probabilities[best_index])

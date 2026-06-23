@@ -21,7 +21,11 @@
     <h3>Transactions</h3>
     <ul>
       {% for txn in transactions %}
-        <li>Tx #{{ txn.id }} • {{ txn.timestamp }} • {{ txn.transaction_type }} • <span class="status-pill{% if txn.risk_level != 'normal' %} alert{% endif %}">{{ txn.risk_level }}</span> • Score {{ txn.risk_score }} • ${{ "%.2f"|format(txn.amount) }}</li>
+        <li>
+          Tx #{{ txn.id }} | {{ txn.timestamp }} | {{ txn.transaction_type }} | ${{ "%.2f"|format(txn.amount) }}
+          <br>Final risk <span class="status-pill{% if txn.risk_level != 'normal' %} alert{% endif %}">{{ txn.risk_level }}</span> | Score {{ "%.0f"|format(txn.risk_score or 0) }}
+          <br><span class="muted-line">Rules risk: {{ txn.rule_level or 'normal' }} / {{ "%.0f"|format(txn.rule_score or 0) }} | AI behavior risk: {{ txn.ai_risk_level or 'unavailable' }}{% if txn.ai_confidence is not none %} / {{ "%.0f"|format((txn.ai_confidence or 0) * 100) }}%{% endif %}</span>
+        </li>
       {% endfor %}
     </ul>
   </div>
@@ -29,14 +33,14 @@
     <h3>Alerts</h3>
     <ul id="compliance-alerts">
       {% for alert in alerts %}
-        <li>Alert #{{ alert.id }} • Tx #{{ alert.transaction_id }} • {{ alert.timestamp }} • {{ alert.account_number }} • <span class="status-pill alert">{{ alert.risk_level }}</span> • {{ alert.reason }}</li>
+        <li>Alert #{{ alert.id }} | Tx #{{ alert.transaction_id }} | {{ alert.timestamp }} | {{ alert.account_number }} | <span class="status-pill alert">{{ alert.risk_level }}</span> | {{ alert.reason }}</li>
       {% endfor %}
     </ul>
   </div>
 </section>
 <section class="card">
   <h3>Live Compliance Feed</h3>
-  <p id="compliance-status">Connected • live alert monitoring active</p>
+  <p id="compliance-status">Connected | live alert monitoring active</p>
   <ul id="compliance-feed"></ul>
 </section>
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
@@ -53,18 +57,18 @@
   if (window.io) {
     const socket = io({ transports: ['websocket', 'polling'] });
     socket.on('connect', () => {
-      status.textContent = 'Connected • WebSocket alert monitoring active';
+      status.textContent = 'Connected | WebSocket alert monitoring active';
     });
     socket.on('alert', (alert) => {
-      addFeedItem(`Alert • Tx #${alert.transaction_id} • ${alert.risk_level} • Score ${alert.risk_score} • ${alert.reason}`);
-      status.textContent = 'New alert received • stream active';
+      addFeedItem(`Alert | Tx #${alert.transaction_id} | ${alert.risk_level} | Score ${alert.risk_score} | ${alert.reason}`);
+      status.textContent = 'New alert received | stream active';
     });
   } else if (window.EventSource) {
     const source = new EventSource('/stream');
     source.addEventListener('alert', (event) => {
       const alert = JSON.parse(event.data);
-      addFeedItem(`Alert • Tx #${alert.transaction_id} • ${alert.risk_level} • Score ${alert.risk_score} • ${alert.reason}`);
-      status.textContent = 'New alert received • stream active';
+      addFeedItem(`Alert | Tx #${alert.transaction_id} | ${alert.risk_level} | Score ${alert.risk_score} | ${alert.reason}`);
+      status.textContent = 'New alert received | stream active';
     });
   }
 </script>

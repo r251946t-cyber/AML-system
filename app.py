@@ -28,7 +28,7 @@ import smtplib
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from functools import wraps
 from queue import Queue
@@ -50,7 +50,7 @@ from flask import (
 from flask_socketio import SocketIO
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from ai_detector import delete_ai_model, predict_risk_level, train_ai_model
+from ai_detector import PROFILE_FEATURE_DEFAULTS, delete_ai_model, predict_risk_level, train_ai_model
 from aml_logic import analyze_transaction, get_triggered_rules
 from config import DevelopmentConfig, ProductionConfig, TestingConfig
 from realtime import RealtimeBroker
@@ -259,6 +259,12 @@ def get_schema_sql():
         status {text_type} NOT NULL,
         risk_score {real_type} DEFAULT 0,
         risk_level {text_type} DEFAULT 'normal',
+        rule_score {real_type} DEFAULT 0,
+        rule_level {text_type} DEFAULT 'normal',
+        rule_reason {long_text_type},
+        ai_risk_level {text_type},
+        ai_confidence {real_type} DEFAULT 0,
+        ai_reason {long_text_type},
         description {long_text_type},
         rules_triggered {long_text_type},
         ctr_required INTEGER DEFAULT 0,
@@ -345,6 +351,9 @@ def _migrate_sqlite(conn):
     migrations = {
         "users": ["kyc_status TEXT DEFAULT 'pending'", "pep_flag INTEGER DEFAULT 0", "risk_rating TEXT DEFAULT 'standard'"],
         "transactions": ["currency TEXT DEFAULT 'USD'", "channel TEXT DEFAULT 'online'",
+                         "rule_score REAL DEFAULT 0", "rule_level TEXT DEFAULT 'normal'",
+                         "rule_reason TEXT", "ai_risk_level TEXT", "ai_confidence REAL DEFAULT 0",
+                         "ai_reason TEXT",
                          "rules_triggered TEXT DEFAULT '[]'", "ctr_required INTEGER DEFAULT 0",
                          "sar_required INTEGER DEFAULT 0", "reviewed_by TEXT", "reviewed_at TEXT"],
         "alerts": ["rules_triggered TEXT DEFAULT '[]'", "status TEXT DEFAULT 'open'",
@@ -360,9 +369,30 @@ def _migrate_sqlite(conn):
 
 def _migrate_mysql(conn):
     """Widen older MySQL VARCHAR columns that store AML evidence JSON/text."""
+    column_migrations = {
+        "transactions": [
+            ("rule_score", "DOUBLE DEFAULT 0"),
+            ("rule_level", "VARCHAR(255) DEFAULT 'normal'"),
+            ("rule_reason", "LONGTEXT"),
+            ("ai_risk_level", "VARCHAR(255)"),
+            ("ai_confidence", "DOUBLE DEFAULT 0"),
+            ("ai_reason", "LONGTEXT"),
+        ],
+    }
+    for table, columns in column_migrations.items():
+        existing = {
+            row["Field"]
+            for row in conn.execute(f"SHOW COLUMNS FROM {table}").fetchall()
+        }
+        for column_name, column_def in columns:
+            if column_name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {column_def}")
+
     migrations = [
         "ALTER TABLE transactions MODIFY COLUMN description LONGTEXT",
         "ALTER TABLE transactions MODIFY COLUMN rules_triggered LONGTEXT",
+        "ALTER TABLE transactions MODIFY COLUMN rule_reason LONGTEXT",
+        "ALTER TABLE transactions MODIFY COLUMN ai_reason LONGTEXT",
         "ALTER TABLE alerts MODIFY COLUMN reason LONGTEXT NOT NULL",
         "ALTER TABLE alerts MODIFY COLUMN rules_triggered LONGTEXT",
         "ALTER TABLE alerts MODIFY COLUMN case_notes LONGTEXT",
@@ -541,6 +571,188 @@ def create_alert_if_needed(conn, transaction_id, account_number, risk_score, ris
     return False
 
 
+def _parse_timestamp(value):
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return datetime.now(timezone.utc)
+
+
+def _history_profile(amount, receiver_account, timestamp, history):
+    amounts = history.get("amounts", [])
+    recipients = history.get("recipients", set())
+    events = history.get("events", [])
+    amount = float(amount)
+    avg_amount = sum(amounts) / len(amounts) if amounts else 0.0
+    max_amount = max(amounts) if amounts else 0.0
+    current_time = _parse_timestamp(timestamp)
+    cutoff = current_time - timedelta(hours=24)
+    recent_amounts = [
+        float(event_amount)
+        for event_time, event_amount in events
+        if event_time >= cutoff
+    ]
+    volume_24h = sum(recent_amounts)
+
+    profile = dict(PROFILE_FEATURE_DEFAULTS)
+    profile.update({
+        "sender_avg_amount": avg_amount,
+        "sender_max_amount": max_amount,
+        "sender_tx_count": len(amounts),
+        "amount_to_sender_avg": amount / avg_amount if avg_amount > 0 else 1.0,
+        "amount_to_sender_max": amount / max_amount if max_amount > 0 else 1.0,
+        "sender_tx_count_24h": len(recent_amounts),
+        "sender_volume_24h": volume_24h,
+        "amount_to_sender_volume_24h": amount / volume_24h if volume_24h > 0 else 1.0,
+        "is_new_recipient": 0.0 if receiver_account in recipients else 1.0,
+    })
+    return profile
+
+
+def _ai_profile_for_transaction(conn, transaction_id, sender_account, receiver_account, amount, timestamp):
+    cutoff = (_parse_timestamp(timestamp) - timedelta(hours=24)).isoformat()
+    prior = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS tx_count,
+            COALESCE(AVG(amount), 0) AS avg_amount,
+            COALESCE(MAX(amount), 0) AS max_amount
+        FROM transactions
+        WHERE sender_account=? AND id<>? AND timestamp<?
+        """,
+        (sender_account, transaction_id, timestamp),
+    ).fetchone()
+    recent = conn.execute(
+        """
+        SELECT COUNT(*) AS tx_count, COALESCE(SUM(amount), 0) AS volume
+        FROM transactions
+        WHERE sender_account=? AND id<>? AND timestamp>=? AND timestamp<?
+        """,
+        (sender_account, transaction_id, cutoff, timestamp),
+    ).fetchone()
+    recipient_seen = conn.execute(
+        """
+        SELECT id FROM transactions
+        WHERE sender_account=? AND receiver_account=? AND id<>? AND timestamp<?
+        LIMIT 1
+        """,
+        (sender_account, receiver_account, transaction_id, timestamp),
+    ).fetchone()
+
+    avg_amount = float(prior["avg_amount"] if prior else 0)
+    max_amount = float(prior["max_amount"] if prior else 0)
+    tx_count = int(prior["tx_count"] if prior else 0)
+    volume_24h = float(recent["volume"] if recent else 0)
+    amount = float(amount)
+
+    profile = dict(PROFILE_FEATURE_DEFAULTS)
+    profile.update({
+        "sender_avg_amount": avg_amount,
+        "sender_max_amount": max_amount,
+        "sender_tx_count": tx_count,
+        "amount_to_sender_avg": amount / avg_amount if avg_amount > 0 else 1.0,
+        "amount_to_sender_max": amount / max_amount if max_amount > 0 else 1.0,
+        "sender_tx_count_24h": int(recent["tx_count"] if recent else 0),
+        "sender_volume_24h": volume_24h,
+        "amount_to_sender_volume_24h": amount / volume_24h if volume_24h > 0 else 1.0,
+        "is_new_recipient": 0.0 if recipient_seen else 1.0,
+    })
+    return profile
+
+
+def _ai_training_rows(rows):
+    histories = {}
+    enriched = []
+    for row in rows:
+        sender = row["sender_account"]
+        history = histories.setdefault(sender, {"amounts": [], "recipients": set(), "events": []})
+        profile = _history_profile(row["amount"], row["receiver_account"], row["timestamp"], history)
+        item = dict(row)
+        item.update(profile)
+        enriched.append(item)
+        history["amounts"].append(float(row["amount"]))
+        history["recipients"].add(row["receiver_account"])
+        history["events"].append((_parse_timestamp(row["timestamp"]), float(row["amount"])))
+    return enriched
+
+
+RISK_RANK = {
+    "normal": 0,
+    "low": 1,
+    "suspicious": 2,
+    "super_suspicious": 3,
+    "high_risk": 3,
+    "critical": 4,
+}
+
+
+def _risk_level_from_score(score):
+    if score >= 80:
+        return "critical"
+    if score >= 60:
+        return "high_risk"
+    if score >= 40:
+        return "suspicious"
+    if score >= 25:
+        return "low"
+    return "normal"
+
+
+def _is_mandatory_compliance_hit(triggered_rules, rule_reason):
+    return (
+        "[CTR REQUIRED]" in (rule_reason or "")
+        or any(rule.rule_id == "R09" for rule in triggered_rules)
+    )
+
+
+def _combine_rule_ai_risk(rule_score, rule_level, rule_reason, triggered_rules, ai_level, ai_confidence):
+    mandatory = _is_mandatory_compliance_hit(triggered_rules, rule_reason)
+    ai_reason = "AI model unavailable or not confident enough to affect final risk."
+    final_score = rule_score
+    final_level = rule_level
+    final_reason = rule_reason
+
+    if ai_level:
+        ai_reason = (
+            f"AI behavior model predicted {ai_level.replace('_', ' ')} "
+            f"with {ai_confidence:.0%} confidence."
+        )
+
+    if ai_level and ai_confidence >= 0.55:
+        ai_score = AI_RISK_SCORES.get(ai_level, rule_score)
+        ai_rank = RISK_RANK.get(ai_level, 0)
+
+        if ai_level == "normal" and ai_confidence >= 0.75 and not mandatory:
+            if rule_score < 60:
+                final_score = min(rule_score, 20)
+                final_level = "normal"
+                final_reason = (
+                    f"AI behavior model recognized this as normal for the sender "
+                    f"({ai_confidence:.0%} confidence). Rule review: {rule_reason}"
+                )
+            else:
+                final_score = min(rule_score, 55)
+                final_level = _risk_level_from_score(final_score)
+                final_reason = (
+                    f"AI behavior model reduced a non-mandatory rule alert "
+                    f"({ai_confidence:.0%} normal confidence). Rule review: {rule_reason}"
+                )
+        elif ai_rank > RISK_RANK.get(rule_level, 0) and not mandatory:
+            final_score = max(rule_score, ai_score)
+            final_level = _risk_level_from_score(final_score)
+            final_reason = (
+                f"AI behavior model added user-specific abnormal-behavior risk "
+                f"({ai_confidence:.0%} confidence). Rule review: {rule_reason}"
+            )
+
+    if mandatory and RISK_RANK.get(final_level, 0) < RISK_RANK.get(rule_level, 0):
+        final_score = rule_score
+        final_level = rule_level
+        final_reason = f"Mandatory compliance rule preserved. {rule_reason}"
+
+    return final_score, final_level, final_reason, ai_reason
+
+
 def process_transaction_event(
     conn,
     transaction_id,
@@ -552,7 +764,7 @@ def process_transaction_event(
     account_number=None,
     emit_events=True,
 ):
-    risk_score, risk_level, reason = analyze_transaction(
+    rule_score, rule_level, rule_reason = analyze_transaction(
         conn, transaction_type, amount, sender_account, receiver_account, timestamp
     )
     triggered = get_triggered_rules(
@@ -563,31 +775,41 @@ def process_transaction_event(
         for r in triggered
     ])
 
-    ai_level, ai_confidence = predict_risk_level({
+    ai_transaction = {
         "sender_account": sender_account,
         "receiver_account": receiver_account,
         "amount": amount,
         "transaction_type": transaction_type,
         "timestamp": timestamp,
-    })
-    if ai_level and ai_confidence >= 0.55:
-        risk_level = ai_level
-        risk_score = AI_RISK_SCORES.get(ai_level, risk_score)
-        reason = f"AI model classified transaction as {ai_level.replace('_', ' ')} ({ai_confidence:.0%} confidence)"
+    }
+    ai_transaction.update(
+        _ai_profile_for_transaction(
+            conn, transaction_id, sender_account, receiver_account, amount, timestamp
+        )
+    )
+    ai_level, ai_confidence = predict_risk_level(ai_transaction)
+    risk_score, risk_level, reason, ai_reason = _combine_rule_ai_risk(
+        rule_score, rule_level, rule_reason, triggered, ai_level, ai_confidence
+    )
 
-    ctr_required = 1 if "[CTR REQUIRED]" in reason else 0
-    sar_required = 1 if "[SAR REVIEW]" in reason else 0
+    ctr_required = 1 if "[CTR REQUIRED]" in rule_reason else 0
+    sar_required = 1 if "[SAR REVIEW]" in rule_reason else 0
     if risk_level in ("suspicious", "super_suspicious", "high_risk", "critical"):
         sar_required = 1
 
     conn.execute(
         """
         UPDATE transactions
-        SET risk_score=?, risk_level=?, description=?, rules_triggered=?,
+        SET risk_score=?, risk_level=?, rule_score=?, rule_level=?, rule_reason=?,
+            ai_risk_level=?, ai_confidence=?, ai_reason=?, description=?, rules_triggered=?,
             ctr_required=?, sar_required=?
         WHERE id=?
         """,
-        (risk_score, risk_level, reason, rules_json, ctr_required, sar_required, transaction_id),
+        (
+            risk_score, risk_level, rule_score, rule_level, rule_reason,
+            ai_level, ai_confidence, ai_reason, reason, rules_json,
+            ctr_required, sar_required, transaction_id,
+        ),
     )
 
     created_alert = create_alert_if_needed(
@@ -1252,13 +1474,17 @@ def generate_transactions():
         get_db().execute(
             """
             INSERT INTO transactions (sender_account, receiver_account, amount, transaction_type,
-                currency, channel, timestamp, status, risk_score, risk_level, description,
+                currency, channel, timestamp, status, risk_score, risk_level,
+                rule_score, rule_level, rule_reason, ai_risk_level, ai_confidence, ai_reason, description,
                 rules_triggered, ctr_required, sar_required)
-            VALUES (?,?,?,?,'USD','simulator',?,'Completed',?,?,?,?,?,?)
+            VALUES (?,?,?,?,'USD','simulator',?,'Completed',?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 sender_account, receiver_account, amount, tx_type, timestamp,
-                risk_score, label, reason, rules_json, ctr_required, sar_required,
+                risk_score, label,
+                risk_score, label, reason, label, 1.0,
+                f"Simulator label: {label.replace('_', ' ')}",
+                reason, rules_json, ctr_required, sar_required,
             ),
         )
         transaction_id = get_last_insert_id(get_db())
@@ -1284,9 +1510,13 @@ def generate_transactions():
 
     get_db().commit()
     rows = get_db().execute(
-        "SELECT sender_account, receiver_account, amount, transaction_type, timestamp, risk_level FROM transactions"
+        """
+        SELECT id, sender_account, receiver_account, amount, transaction_type, timestamp, risk_level
+        FROM transactions
+        ORDER BY timestamp ASC, id ASC
+        """
     ).fetchall()
-    model = train_ai_model(rows)
+    model = train_ai_model(_ai_training_rows(rows))
     record_activity(
         admin_user["username"],
         "generate_transactions",

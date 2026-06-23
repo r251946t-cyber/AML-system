@@ -34,7 +34,11 @@
     <h3>Recent Transactions</h3>
     <ul>
       {% for txn in transactions %}
-        <li>Tx #{{ txn.id }} • {{ txn.timestamp }} • {{ txn.transaction_type }} • ${{ "%.2f"|format(txn.amount) }} • <span class="status-pill{% if txn.risk_level != 'normal' %} alert{% endif %}">{{ txn.risk_level }}</span></li>
+        <li>
+          Tx #{{ txn.id }} • {{ txn.timestamp }} • {{ txn.transaction_type }} • ${{ "%.2f"|format(txn.amount) }}
+          <br>Final risk <span class="status-pill{% if txn.risk_level != 'normal' %} alert{% endif %}">{{ txn.risk_level }}</span> • Score {{ "%.0f"|format(txn.risk_score or 0) }}
+          <br><span class="muted-line">Rules risk: {{ txn.rule_level or 'normal' }} / {{ "%.0f"|format(txn.rule_score or 0) }} • AI behavior risk: {{ txn.ai_risk_level or 'unavailable' }}{% if txn.ai_confidence is not none %} / {{ "%.0f"|format((txn.ai_confidence or 0) * 100) }}%{% endif %}</span>
+        </li>
       {% endfor %}
     </ul>
   </div>
