@@ -22,12 +22,6 @@
             Generate Transactions
         </button>
     </form>
-
-    <form method="post" action="{{ url_for('clear_transactions') }}">
-        <button type="submit">
-            Clear All Transactions
-        </button>
-    </form>
 </div>
 
 <section class="grid">
@@ -100,5 +94,13 @@
       <li>{{ txn.timestamp }} • {{ txn.sender_account }} → {{ txn.receiver_account }} • ${{ "%.2f"|format(txn.amount) }} • <span class="status-pill{% if txn.risk_level != 'normal' %} alert{% endif %}">{{ txn.risk_level }}</span></li>
     {% endfor %}
   </ul>
+</section>
+
+<section class="admin-danger-zone">
+  <form method="post" action="{{ url_for('clear_transactions') }}">
+    <button type="submit" class="danger-button">
+      Clear All Transactions
+    </button>
+  </form>
 </section>
 {% endblock %}

@@ -224,6 +224,18 @@ button {
   border: none;
 }
 button:hover { filter: brightness(1.04); }
+.admin-danger-zone {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+.admin-danger-zone form {
+  width: min(100%, 280px);
+}
+.danger-button {
+  width: 100%;
+  background: linear-gradient(90deg, var(--zb-danger) 0%, #922f2f 100%);
+}
 
 .flash-messages {
   margin: 0 0 1rem;
