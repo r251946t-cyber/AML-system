@@ -524,6 +524,21 @@ def _simulation_plan(count):
     return labels
 
 
+def _simulation_timestamp(hour):
+    now = datetime.now(timezone.utc)
+    days_back = random.randint(1, 30)
+    candidate = now - timedelta(
+        days=days_back,
+        minutes=random.randint(0, 23 * 60 + 59),
+    )
+    return candidate.replace(
+        hour=hour,
+        minute=random.randint(0, 59),
+        second=random.randint(0, 59),
+        microsecond=0,
+    ).isoformat()
+
+
 def _simulation_transaction(label, users):
     if label == "normal":
         tx_type = random.choices(["deposit", "withdraw", "transfer"], weights=[35, 25, 40], k=1)[0]
@@ -543,8 +558,7 @@ def _simulation_transaction(label, users):
     if tx_type == "transfer" and len(users) > 1:
         recipient = random.choice([user for user in users if user["id"] != sender["id"]])
 
-    now = datetime.now(timezone.utc)
-    timestamp = now.replace(hour=hour, minute=random.randint(0, 59), second=random.randint(0, 59)).isoformat()
+    timestamp = _simulation_timestamp(hour)
     return sender, recipient, tx_type, amount, timestamp
 
 
@@ -1141,7 +1155,7 @@ def customer_dashboard():
     page = int(request.args.get("page", 1))
     offset = (page - 1) * PAGE_SIZE
     transactions = get_db().execute(
-        "SELECT * FROM transactions WHERE sender_account=? OR receiver_account=? ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+        "SELECT * FROM transactions WHERE sender_account=? OR receiver_account=? ORDER BY id DESC LIMIT ? OFFSET ?",
         (user["account_number"], user["account_number"], PAGE_SIZE, offset),
     ).fetchall()
     alerts = get_db().execute(
@@ -1261,7 +1275,7 @@ def compliance_dashboard():
         base = ""
 
     transactions = get_db().execute(
-        f"SELECT * FROM transactions {base} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM transactions {base} ORDER BY id DESC LIMIT ? OFFSET ?",
         (PAGE_SIZE, offset),
     ).fetchall()
     total_count = get_db().execute(
@@ -1430,7 +1444,7 @@ def admin_dashboard():
         (PAGE_SIZE, offset),
     ).fetchall()
     transactions = get_db().execute(
-        "SELECT * FROM transactions ORDER BY timestamp DESC LIMIT 20"
+        "SELECT * FROM transactions ORDER BY id DESC LIMIT 20"
     ).fetchall()
     watchlist = get_db().execute(
         "SELECT * FROM watchlist ORDER BY added_at DESC LIMIT 20"
@@ -1629,7 +1643,7 @@ def api_transactions():
     page = int(request.args.get("page", 1))
     offset = (page - 1) * PAGE_SIZE
     rows = get_db().execute(
-        "SELECT * FROM transactions ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+        "SELECT * FROM transactions ORDER BY id DESC LIMIT ? OFFSET ?",
         (PAGE_SIZE, offset),
     ).fetchall()
     return jsonify([dict(r) for r in rows])

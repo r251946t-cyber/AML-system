@@ -1,5 +1,6 @@
 import os
 import tempfile
+from datetime import datetime, timezone
 from queue import Queue
 from types import SimpleNamespace
 
@@ -412,6 +413,9 @@ def test_admin_generates_simulated_transactions_and_trains_ai(client):
         simulator_rows = conn.execute(
             "SELECT COUNT(*) as c FROM transactions WHERE channel='simulator'"
         ).fetchone()["c"]
+        newest_timestamp = conn.execute(
+            "SELECT MAX(timestamp) as t FROM transactions WHERE channel='simulator'"
+        ).fetchone()["t"]
 
     assert total == 100
     assert normal == 80
@@ -419,7 +423,49 @@ def test_admin_generates_simulated_transactions_and_trains_ai(client):
     assert super_suspicious == 5
     assert alerts == 20
     assert simulator_rows == 100
+    assert datetime.fromisoformat(newest_timestamp) <= datetime.now(timezone.utc)
     assert os.path.exists(ai_detector.MODEL_PATH)
+
+
+def test_customer_transaction_is_newest_after_simulated_history(client):
+    client.post(
+        "/login",
+        data={"login": "Admin", "password": "Admin123"},
+        follow_redirects=True,
+    )
+    client.post(
+        "/admin/generate-transactions",
+        data={"count": "100"},
+        follow_redirects=True,
+    )
+    client.get("/logout", follow_redirects=True)
+    client.post(
+        "/login",
+        data={"email": "demo@example.com", "id_number": "63-1000003A03", "password": "demo123"},
+        follow_redirects=True,
+    )
+
+    response = client.post(
+        "/customer/transaction",
+        data={"type": "deposit", "amount": "25"},
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    with aml_app.app.app_context():
+        demo = aml_app.get_user_by_username("demo")
+        newest = aml_app.get_db().execute(
+            """
+            SELECT * FROM transactions
+            WHERE sender_account=? OR receiver_account=?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (demo["account_number"], demo["account_number"]),
+        ).fetchone()
+
+    assert newest["channel"] == "online"
+    assert float(newest["amount"]) == 25
 
 
 def test_admin_clears_transactions_reports_alerts_and_ai_model(client):
