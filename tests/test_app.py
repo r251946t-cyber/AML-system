@@ -199,7 +199,75 @@ def test_high_value_transfer_creates_alert(client):
     assert b"high risk" in response.data.lower() or b"suspicious" in response.data.lower()
 
 
-def test_stream_endpoint_is_available(client):
+def test_customer_transfer_requires_funds_and_customer_recipient(client):
+    client.post(
+        "/register",
+        data={"username": "recipient", "email": "recipient@example.com", "id_number": "63-7777777A77", "password": "secret123", "role": "customer"},
+        follow_redirects=True,
+    )
+    with client.session_transaction() as session:
+        recipient_otp = session["pending_registration"]["otp"]
+    client.post("/register", data={"otp": recipient_otp}, follow_redirects=True)
+
+    with aml_app.app.app_context():
+        recipient_account = aml_app.get_user_by_username("recipient")["account_number"]
+
+    client.get("/logout", follow_redirects=True)
+    client.post(
+        "/login",
+        data={"email": "demo@example.com", "id_number": "63-1000003A03", "password": "demo123"},
+        follow_redirects=True,
+    )
+
+    overdrawn = client.post(
+        "/customer/transaction",
+        data={"type": "transfer", "recipient": recipient_account, "amount": "6000"},
+        follow_redirects=True,
+    )
+    assert overdrawn.status_code == 200
+    assert b"Insufficient funds" in overdrawn.data
+
+    staff_target = client.post(
+        "/customer/transaction",
+        data={"type": "transfer", "recipient": "ACC1001", "amount": "10"},
+        follow_redirects=True,
+    )
+    assert staff_target.status_code == 200
+    assert b"Recipient customer account not found" in staff_target.data
+
+
+def test_customer_transaction_rejects_invalid_type(client):
+    client.post(
+        "/login",
+        data={"email": "demo@example.com", "id_number": "63-1000003A03", "password": "demo123"},
+        follow_redirects=True,
+    )
+    with aml_app.app.app_context():
+        before = aml_app.get_db().execute("SELECT COUNT(*) as c FROM transactions").fetchone()["c"]
+
+    response = client.post(
+        "/customer/transaction",
+        data={"type": "wire", "amount": "10"},
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert b"Invalid transaction type" in response.data
+    with aml_app.app.app_context():
+        after = aml_app.get_db().execute("SELECT COUNT(*) as c FROM transactions").fetchone()["c"]
+    assert after == before
+
+
+def test_stream_requires_login_and_is_available_to_staff(client):
+    response = client.get("/stream")
+    assert response.status_code == 302
+    assert "/login" in response.location
+
+    client.post(
+        "/login",
+        data={"login": "Compliance", "password": "Compliance123"},
+        follow_redirects=True,
+    )
     response = client.get("/stream")
     assert response.status_code == 200
     assert "text/event-stream" in response.content_type
@@ -235,9 +303,11 @@ def test_transaction_processing_emits_live_events(client):
 
         event = queue.get_nowait()
         assert event["event"] == "transaction"
+        assert event["data"]["sar_required"] is True
+        assert event["data"]["ctr_required"] is False
 
 
-def test_ai_can_soften_non_mandatory_rule_risk():
+def test_ai_cannot_downgrade_suspicious_rule_risk_to_normal():
     score, level, reason, ai_reason = aml_app._combine_rule_ai_risk(
         45,
         "suspicious",
@@ -247,9 +317,9 @@ def test_ai_can_soften_non_mandatory_rule_risk():
         0.92,
     )
 
-    assert score < 25
-    assert level == "normal"
-    assert "AI-led behavior model recognized this as normal" in reason
+    assert score >= 40
+    assert level == "suspicious"
+    assert "did not downgrade" in reason
     assert "normal" in ai_reason
 
 

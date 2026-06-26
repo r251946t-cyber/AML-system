@@ -83,6 +83,7 @@ ID_NUMBER_PATTERN = re.compile(r"^\d{2}-\d{6,7}[A-Z]\d{2}$")
 ID_NUMBER_FORMAT_MESSAGE = "ID number must use the format 00-000000A00, for example 08-995728P34."
 
 PAGE_SIZE = 25  # rows per paginated list
+VALID_TRANSACTION_TYPES = {"deposit", "withdraw", "transfer"}
 
 AI_RISK_SCORES = {
     "normal": 10,
@@ -525,6 +526,14 @@ def broadcast_stats(conn=None):
     broadcast_event("stats", _stats_payload(conn))
 
 
+def request_page(default=1):
+    try:
+        page = int(request.args.get("page", default))
+    except (TypeError, ValueError):
+        return default
+    return max(1, page)
+
+
 def _user_balance_payload(row):
     return {
         "user_id": row["id"],
@@ -923,6 +932,8 @@ def _train_ai_model_from_db(conn, emit_events=True):
 
 def _transaction_payload(row):
     confidence = row["ai_confidence"] if "ai_confidence" in row.keys() else 0
+    ctr_required = row["ctr_required"] if "ctr_required" in row.keys() else 0
+    sar_required = row["sar_required"] if "sar_required" in row.keys() else 0
     return {
         "id": row["id"],
         "sender_account": row["sender_account"],
@@ -937,6 +948,8 @@ def _transaction_payload(row):
         "rule_score": float(row["rule_score"] or 0),
         "ai_risk_level": row["ai_risk_level"] or "unavailable",
         "ai_confidence": float(confidence or 0),
+        "ctr_required": bool(ctr_required),
+        "sar_required": bool(sar_required),
         "channel": row["channel"] if "channel" in row.keys() else "online",
         "description": row["description"] or "",
     }
@@ -973,6 +986,7 @@ def _is_mandatory_compliance_hit(triggered_rules, rule_reason):
 
 def _combine_rule_ai_risk(rule_score, rule_level, rule_reason, triggered_rules, ai_level, ai_confidence):
     mandatory = _is_mandatory_compliance_hit(triggered_rules, rule_reason)
+    rule_rank = RISK_RANK.get(rule_level, 0)
     ai_reason = "AI model unavailable or not confident enough to affect final risk."
     final_score = rule_score
     final_level = rule_level
@@ -993,7 +1007,7 @@ def _combine_rule_ai_risk(rule_score, rule_level, rule_reason, triggered_rules, 
             rule_weight = 1 - ai_weight
             blended_score = round((ai_score * ai_weight) + (rule_score * rule_weight))
 
-            if ai_level == "normal" and ai_confidence >= 0.75:
+            if ai_level == "normal" and ai_confidence >= 0.75 and rule_rank < RISK_RANK["suspicious"]:
                 final_score = min(blended_score, 24)
                 final_level = "normal"
                 final_reason = (
@@ -1002,9 +1016,14 @@ def _combine_rule_ai_risk(rule_score, rule_level, rule_reason, triggered_rules, 
                     f"Rule review: {rule_reason}"
                 )
             else:
+                if ai_level == "normal" and rule_rank >= RISK_RANK["suspicious"]:
+                    blended_score = max(rule_score, blended_score)
                 final_score = max(0, min(100, blended_score))
                 final_level = _risk_level_from_score(final_score)
-                ai_direction = "increased" if ai_rank > RISK_RANK.get(rule_level, 0) else "tempered"
+                if ai_level == "normal" and rule_rank >= RISK_RANK["suspicious"]:
+                    ai_direction = "reviewed but did not downgrade"
+                else:
+                    ai_direction = "increased" if ai_rank > rule_rank else "tempered"
                 final_reason = (
                     f"AI-led behavior model {ai_direction} the behavioral risk "
                     f"({ai_confidence:.0%} confidence, {ai_weight:.0%} AI weighting). "
@@ -1015,7 +1034,7 @@ def _combine_rule_ai_risk(rule_score, rule_level, rule_reason, triggered_rules, 
                 f"Mandatory compliance rule preserved despite AI normal prediction "
                 f"({ai_confidence:.0%} confidence). Rule review: {rule_reason}"
             )
-        elif ai_rank > RISK_RANK.get(rule_level, 0):
+        elif ai_rank > rule_rank:
             final_score = max(rule_score, ai_score)
             final_level = _risk_level_from_score(final_score)
             final_reason = (
@@ -1239,6 +1258,10 @@ def dashboard_redirect():
     if "user_id" not in session:
         return redirect(url_for("login"))
     user = get_user_by_id(session["user_id"])
+    if user is None:
+        session.clear()
+        flash("Session expired. Please log in again.")
+        return redirect(url_for("login"))
     if user["role"] == "customer":
         return redirect(url_for("customer_dashboard"))
     if user["role"] == "compliance":
@@ -1414,7 +1437,7 @@ def logout():
 @login_required("customer")
 def customer_dashboard():
     user = get_user_by_id(session["user_id"])
-    page = int(request.args.get("page", 1))
+    page = request_page()
     offset = (page - 1) * PAGE_SIZE
     transactions = get_db().execute(
         "SELECT * FROM transactions WHERE sender_account=? OR receiver_account=? ORDER BY id DESC LIMIT ? OFFSET ?",
@@ -1459,6 +1482,10 @@ def create_transaction():
     amount_str = request.form.get("amount", "0")
     recipient_account = normalize_account_number(request.form.get("recipient", ""))
 
+    if tx_type not in VALID_TRANSACTION_TYPES:
+        flash("Invalid transaction type.")
+        return redirect(url_for("customer_dashboard"))
+
     try:
         amount = float(amount_str)
     except ValueError:
@@ -1469,15 +1496,15 @@ def create_transaction():
         flash("Amount must be greater than zero.")
         return redirect(url_for("customer_dashboard"))
 
-    if tx_type == "withdraw" and user["balance"] < amount:
+    if tx_type in ("withdraw", "transfer") and user["balance"] < amount:
         flash("Insufficient funds.")
         return redirect(url_for("customer_dashboard"))
 
     recipient_user = None
     if tx_type == "transfer":
         recipient_user = get_user_by_account_number(recipient_account)
-        if not recipient_user or recipient_user["id"] == user["id"]:
-            flash("Recipient account not found.")
+        if not recipient_user or recipient_user["id"] == user["id"] or recipient_user["role"] != "customer":
+            flash("Recipient customer account not found.")
             return redirect(url_for("customer_dashboard"))
 
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -1534,7 +1561,7 @@ def create_transaction():
 @login_required("compliance", "admin")
 def compliance_dashboard():
     filter_value = request.args.get("filter", "all")
-    page = int(request.args.get("page", 1))
+    page = request_page()
     offset = (page - 1) * PAGE_SIZE
 
     if filter_value == "flagged":
@@ -1744,7 +1771,7 @@ def admin_dashboard():
                 record_activity(admin_user["username"], "add_watchlist", f"Added {name} to watchlist")
                 flash(f"{name} added to watchlist.")
 
-    page = int(request.args.get("page", 1))
+    page = request_page()
     offset = (page - 1) * PAGE_SIZE
     users = get_db().execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()
     activity = get_db().execute(
@@ -1971,16 +1998,17 @@ def api_stats():
 @app.route("/api/v1/transactions")
 @login_required("compliance", "admin")
 def api_transactions():
-    page = int(request.args.get("page", 1))
+    page = request_page()
     offset = (page - 1) * PAGE_SIZE
     rows = get_db().execute(
         "SELECT * FROM transactions ORDER BY id DESC LIMIT ? OFFSET ?",
         (PAGE_SIZE, offset),
     ).fetchall()
-    return jsonify([dict(r) for r in rows])
+    return jsonify(serialize_rows(rows))
 
 
 @app.route("/stream")
+@login_required("customer", "compliance", "admin")
 def stream():
     return app.extensions["realtime_broker"].stream_response()
 

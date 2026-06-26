@@ -225,7 +225,7 @@
             h("label", null, "Amount"),
             h("input", { type: "number", step: "0.01", name: "amount", required: true }),
             h("label", null, "Recipient Account Number"),
-            h("input", { name: "recipient", placeholder: "ACC1002" }),
+            h("input", { name: "recipient", placeholder: "ACC1004" }),
             h("p", { className: "form-hint" }, "Recipient is required for transfers only."),
             h("button", { type: "submit" }, "Process Transaction")
           )
