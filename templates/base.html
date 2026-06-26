@@ -1,14 +1,22 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="{{ request.cookies.get('zb-theme', 'dark') }}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>StanPro Bank | AML Intelligence</title>
     <script>
       (() => {
-        const savedTheme = localStorage.getItem("zb-theme");
+        const getCookieTheme = () => {
+          const themeCookie = document.cookie
+            .split("; ")
+            .find((row) => row.startsWith("zb-theme="));
+          return themeCookie ? decodeURIComponent(themeCookie.split("=")[1]) : "";
+        };
+        const savedTheme = localStorage.getItem("zb-theme") || getCookieTheme();
         const prefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
-        document.documentElement.dataset.theme = savedTheme || (prefersLight ? "light" : "dark");
+        const theme = savedTheme || (prefersLight ? "light" : "dark");
+        document.documentElement.dataset.theme = theme;
+        document.cookie = `zb-theme=${encodeURIComponent(theme)}; Max-Age=31536000; Path=/; SameSite=Lax`;
       })();
     </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -81,6 +89,7 @@
         const nextTheme = document.documentElement.dataset.theme === "light" ? "dark" : "light";
         document.documentElement.dataset.theme = nextTheme;
         localStorage.setItem("zb-theme", nextTheme);
+        document.cookie = `zb-theme=${encodeURIComponent(nextTheme)}; Max-Age=31536000; Path=/; SameSite=Lax`;
         applyThemeLabel();
       });
 
