@@ -149,6 +149,8 @@ html[data-theme="light"] .topbar {
 .brand-mark--stacked {
   display: flex;
   flex-direction: column;
+  justify-content: center;
+  align-items: center;
   gap: 0.02rem;
   line-height: 0.98;
   min-width: 86px;
