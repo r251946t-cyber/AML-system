@@ -112,9 +112,8 @@ html[data-theme="light"] body::before {
   border-radius: 8px;
   box-shadow: var(--zb-shadow);
   backdrop-filter: blur(18px);
-  position: sticky;
-  top: 1rem;
-  z-index: 10;
+  position: relative;
+  z-index: 2;
   animation: slide-down 0.48s var(--ease-out) both;
 }
 
@@ -924,6 +923,37 @@ table tr:nth-child(even) { background: rgba(255, 255, 255, 0.018); }
   background: rgba(79, 140, 255, 0.07);
 }
 .data-table strong { color: #ffffff; }
+
+.admin-transactions-table {
+  min-width: 0;
+  table-layout: auto;
+}
+
+.admin-transactions-table th,
+.admin-transactions-table td {
+  padding-inline: 0.58rem;
+}
+
+.admin-transactions-table th:nth-child(1),
+.admin-transactions-table td:nth-child(1) {
+  width: 30%;
+}
+
+.admin-transactions-table th:nth-child(2),
+.admin-transactions-table td:nth-child(2) {
+  width: 32%;
+}
+
+.admin-transactions-table th:nth-child(3),
+.admin-transactions-table td:nth-child(3) {
+  width: 22%;
+  white-space: nowrap;
+}
+
+.admin-transactions-table th:nth-child(4),
+.admin-transactions-table td:nth-child(4) {
+  width: 16%;
+}
 
 .block-line {
   display: block;

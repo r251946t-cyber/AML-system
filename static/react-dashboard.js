@@ -452,7 +452,7 @@
   function AdminTransactionsPanel({ transactions }) {
     return h("div", { className: "card table-card" },
       h(PanelHeading, { title: "Recent Transactions" }),
-      transactions.length ? h("table", { className: "data-table" },
+      transactions.length ? h("table", { className: "data-table admin-transactions-table" },
         h("thead", null,
           h("tr", null, ["Time", "Route", "Amount", "Risk"].map((head) => h("th", { key: head }, head)))
         ),
