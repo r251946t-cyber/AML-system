@@ -1329,6 +1329,13 @@ def customer_dashboard():
     }
     return render_template(
         "customer_dashboard.html",
+        dashboard_data={
+            "user": serialize_row(user),
+            "transactions": serialize_rows(transactions),
+            "alerts": serialize_rows(alerts),
+            "stats": stats,
+            "page": page,
+        },
         user=user, transactions=transactions, alerts=alerts, stats=stats, page=page,
     )
 
