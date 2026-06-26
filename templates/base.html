@@ -42,8 +42,10 @@
               {% if current_user.role == 'customer' %}
                 <a href="{{ url_for('customer_dashboard') }}" {% if request.endpoint == 'customer_dashboard' %}aria-current="page"{% endif %}>Customer Portal</a>
               {% endif %}
-              {% if current_user.role in ['compliance', 'admin'] %}
+              {% if current_user.role == 'compliance' %}
                 <a href="{{ url_for('compliance_dashboard') }}" {% if request.endpoint == 'compliance_dashboard' %}aria-current="page"{% endif %}>Compliance Hub</a>
+              {% endif %}
+              {% if current_user.role in ['compliance', 'admin'] %}
                 <a href="{{ url_for('reports') }}" {% if request.endpoint == 'reports' %}aria-current="page"{% endif %}>Reports</a>
               {% endif %}
               {% if current_user.role == 'admin' %}

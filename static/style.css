@@ -590,6 +590,14 @@ html[data-theme="light"] .data-table th {
   margin-top: var(--space-5);
 }
 
+.react-dashboard-grid > * {
+  min-width: 0;
+}
+
+.compliance-dashboard-grid {
+  grid-template-columns: minmax(0, 1.25fr) minmax(300px, 0.75fr);
+}
+
 .react-filter-card { margin-top: var(--space-5); display: flex; flex-direction: column; }
 
 .react-filter-card form {
@@ -737,7 +745,7 @@ button:hover {
   color: #ffe39b;
   border: 1px solid rgba(255, 207, 90, 0.3);
   animation: flash-enter 0.24s ease-out;
-  overflow: hidden;
+  overflow: clip;
   transition:
     opacity 0.35s ease,
     transform 0.35s ease,
@@ -746,6 +754,13 @@ button:hover {
     padding 0.35s ease,
     border-width 0.35s ease;
   max-height: 160px;
+}
+
+html[data-theme="light"] .flash-messages {
+  background: #fff4cc;
+  color: #3f2b00;
+  border-color: rgba(138, 98, 11, 0.42);
+  box-shadow: 0 12px 30px rgba(76, 54, 8, 0.12);
 }
 
 .flash-messages.is-clearing {
@@ -761,10 +776,15 @@ button:hover {
 ul { padding-left: 1.1rem; }
 li { margin-bottom: 0.5rem; }
 
-.table-card { overflow-x: auto; }
+.table-card {
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: visible;
+}
 .table-card ul { margin: 0; padding-left: 0; list-style: none; }
 .table-card li {
   padding: 0.85rem 0.15rem;
+  color: var(--zb-text);
   border-bottom: 1px solid rgba(129, 166, 255, 0.12);
   transition: background 0.22s var(--ease-out), padding-left 0.22s var(--ease-out);
 }
@@ -873,7 +893,8 @@ table tr:nth-child(even) { background: rgba(255, 255, 255, 0.018); }
 .data-table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 680px;
+  min-width: 640px;
+  table-layout: fixed;
 }
 
 .data-table th,
@@ -882,6 +903,8 @@ table tr:nth-child(even) { background: rgba(255, 255, 255, 0.018); }
   border-bottom: 1px solid rgba(129, 166, 255, 0.12);
   padding: 0.95rem 0.78rem;
   vertical-align: top;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 .data-table th {
@@ -899,7 +922,6 @@ table tr:nth-child(even) { background: rgba(255, 255, 255, 0.018); }
 }
 .data-table tbody tr:hover {
   background: rgba(79, 140, 255, 0.07);
-  transform: translateX(2px);
 }
 .data-table strong { color: #ffffff; }
 
@@ -944,7 +966,7 @@ html[data-theme="light"] .activity-item p {
   border: 1px solid rgba(66, 232, 164, 0.22);
   font-size: 0.78rem;
   font-weight: 800;
-  white-space: nowrap;
+  max-width: 100%;
   animation: status-breathe 2.2s ease-in-out infinite;
 }
 
@@ -1035,6 +1057,18 @@ html[data-theme="light"] .risk-critical {
   color: white;
   border-color: rgba(114, 228, 255, 0.36);
   transform: translateY(-1px);
+}
+
+html[data-theme="light"] .action-link {
+  background: rgba(29, 92, 255, 0.09);
+  color: #134cae;
+  border-color: rgba(29, 92, 255, 0.22);
+}
+
+html[data-theme="light"] .action-link:hover {
+  background: rgba(29, 92, 255, 0.14);
+  color: #0d347c;
+  border-color: rgba(29, 92, 255, 0.3);
 }
 
 .live-feed-card ul,
@@ -1191,5 +1225,6 @@ html[data-theme="light"] .risk-critical {
   .metric-tile strong { font-size: 1.18rem; }
   .panel-heading-row { align-items: flex-start; }
   .data-table { min-width: 620px; }
+  .compliance-dashboard-grid { grid-template-columns: 1fr; }
   .account-card { min-height: auto; }
 }

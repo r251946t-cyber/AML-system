@@ -518,6 +518,8 @@
     const passesFilter = (txn) => {
       if (filterValue === "flagged") return txn.risk_level !== "normal";
       if (filterValue === "suspicious") return suspiciousLevels.includes(txn.risk_level);
+      if (filterValue === "ctr") return Boolean(txn.ctr_required);
+      if (filterValue === "sar") return Boolean(txn.sar_required);
       return true;
     };
 
@@ -581,7 +583,7 @@
         ),
         h("p", { className: "muted-line" }, `Page ${initialData.page || 1} of ${pageCount} | ${initialData.total_count || 0} matching transactions`)
       ),
-      h("section", { className: "react-dashboard-grid" },
+      h("section", { className: "react-dashboard-grid compliance-dashboard-grid" },
         h(ComplianceTransactionsPanel, { transactions }),
         h(AlertsPanel, { alerts })
       ),
