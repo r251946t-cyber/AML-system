@@ -147,6 +147,14 @@ html[data-theme="light"] .topbar {
 }
 
 .brand-block h1 { margin: 0; font-size: 1.12rem; letter-spacing: 0; }
+
+.brand-name {
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+  line-height: 1;
+}
+
 .brand-block p { margin: 0.14rem 0 0; color: var(--zb-muted); font-size: 0.82rem; }
 
 .topbar-actions {
