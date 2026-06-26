@@ -37,8 +37,28 @@
     return `${Math.round(Number(value || 0) * 100)}%`;
   }
 
+  function normalizeLevel(level) {
+    return String(level || "normal").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  }
+
+  function labelize(value) {
+    return String(value || "normal").replace(/_/g, " ");
+  }
+
+  function shortTime(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
   function riskClass(level) {
-    return level && level !== "normal" ? "status-pill alert" : "status-pill";
+    return `status-pill risk-pill risk-${normalizeLevel(level)}`;
   }
 
   function trim(list, count) {
@@ -49,13 +69,31 @@
     return h("section", { className: "react-metrics" },
       items.map((item) => h("div", { className: "metric-tile", key: item.label },
         h("span", { className: "metric-label" }, item.label),
-        h("strong", null, item.value)
+        h("strong", null, item.value),
+        item.caption ? h("small", null, item.caption) : null
       ))
     );
   }
 
   function EmptyState({ children }) {
-    return h("p", { className: "muted-line empty-state" }, children);
+    return h("div", { className: "empty-state" },
+      h("span", { className: "empty-state-icon", "aria-hidden": "true" }, "i"),
+      h("p", null, children)
+    );
+  }
+
+  function PanelHeading({ title, meta }) {
+    return h("div", { className: "panel-heading-row" },
+      h("h3", null, title),
+      meta || null
+    );
+  }
+
+  function LiveStatus({ children, tone = "live" }) {
+    return h("span", { className: `live-status ${tone}` },
+      h("span", { className: "live-dot", "aria-hidden": "true" }),
+      children
+    );
   }
 
   function useRealtime(handlers) {
@@ -160,34 +198,35 @@
     });
 
     const metricItems = [
-      { label: "Available balance", value: money(balance) },
-      { label: "Transactions", value: stats.total_tx || transactions.length },
-      { label: "Flagged", value: stats.flagged || 0 },
-      { label: "Open alerts", value: stats.open_alerts || alerts.filter((alert) => alert.status === "open").length },
+      { label: "Available balance", value: money(balance), caption: accountNumber },
+      { label: "Transactions", value: stats.total_tx || transactions.length, caption: "account history" },
+      { label: "Flagged", value: stats.flagged || 0, caption: "requires attention" },
+      { label: "Open alerts", value: stats.open_alerts || alerts.filter((alert) => alert.status === "open").length, caption: "live cases" },
     ];
 
     return h(window.React.Fragment, null,
       h(StatGrid, { items: metricItems }),
       h("section", { className: "grid" },
-        h("div", { className: "card" },
+        h("div", { className: "card account-card" },
           h("p", { className: "status-pill" }, "Primary Account"),
           h("h3", null, accountNumber),
           h("p", { className: "metric" }, money(balance)),
-          h("p", null, "Available balance")
+          h("p", { className: "muted-line" }, "Available balance updates automatically after every live transaction.")
         ),
-        h("div", { className: "card" },
-          h("h3", null, "Initiate Transaction"),
+        h("div", { className: "card action-card" },
+          h(PanelHeading, { title: "Initiate Transaction" }),
           h("form", { method: "post", action: "/customer/transaction" },
             h("label", null, "Type"),
             h("select", { name: "type", defaultValue: "deposit" },
               h("option", { value: "deposit" }, "Deposit"),
               h("option", { value: "withdraw" }, "Withdrawal"),
-              h("option", { value: "transfer" }, "Transfer")
+            h("option", { value: "transfer" }, "Transfer")
             ),
             h("label", null, "Amount"),
             h("input", { type: "number", step: "0.01", name: "amount", required: true }),
             h("label", null, "Recipient Account Number"),
             h("input", { name: "recipient", placeholder: "ACC1002" }),
+            h("p", { className: "form-hint" }, "Recipient is required for transfers only."),
             h("button", { type: "submit" }, "Process Transaction")
           )
         )
@@ -197,10 +236,7 @@
         h(CustomerAlertsPanel, { alerts })
       ),
       h("section", { className: "card table-card live-feed-card" },
-        h("div", { className: "panel-heading-row" },
-          h("h3", null, "Live AML Feed"),
-          h("span", { className: "status-pill" }, status)
-        ),
+        h(PanelHeading, { title: "Live AML Feed", meta: h(LiveStatus, null, status) }),
         feed.length ? h("ul", null, feed.map((event, index) => (
           h("li", { key: `${event.timestamp}-${index}` }, `${event.timestamp} - ${event.text}`)
         ))) : h(EmptyState, null, "Waiting for live events.")
@@ -210,35 +246,52 @@
 
   function CustomerTransactionsPanel({ transactions }) {
     return h("div", { className: "card table-card" },
-      h("h3", null, "Recent Transactions"),
-      transactions.length ? h("ul", null, transactions.map((txn, index) => (
-        h("li", { key: txn.id || index },
-          h("strong", null, `Tx #${txn.id || ""}`),
-          ` | ${txn.timestamp || ""} | ${txn.transaction_type || txn.type || ""} | ${money(txn.amount)}`,
-          h("br"),
-          "Final risk ",
-          h("span", { className: riskClass(txn.risk_level) }, txn.risk_level || "normal"),
-          ` | Score ${score(txn.risk_score)}`,
-          h("br"),
-          h("span", { className: "muted-line" },
-            `Rules risk: ${txn.rule_level || "normal"} / ${score(txn.rule_score)} | AI behavior risk: ${txn.ai_risk_level || "unavailable"} / ${confidence(txn.ai_confidence)}`
-          )
+      h(PanelHeading, { title: "Recent Transactions" }),
+      transactions.length ? h("table", { className: "data-table" },
+        h("thead", null,
+          h("tr", null, ["Transaction", "Type", "Amount", "Risk", "AI"].map((head) => h("th", { key: head }, head)))
+        ),
+        h("tbody", null,
+          transactions.map((txn, index) => h("tr", { key: txn.id || index },
+            h("td", null,
+              h("strong", null, `#${txn.id || ""}`),
+              h("span", { className: "muted-line block-line" }, shortTime(txn.timestamp))
+            ),
+            h("td", null, labelize(txn.transaction_type || txn.type)),
+            h("td", null, money(txn.amount)),
+            h("td", null,
+              h("span", { className: riskClass(txn.risk_level) }, labelize(txn.risk_level)),
+              h("span", { className: "muted-line block-line" }, `Score ${score(txn.risk_score)}`)
+            ),
+            h("td", null,
+              h("span", null, labelize(txn.ai_risk_level || "unavailable")),
+              h("span", { className: "muted-line block-line" }, confidence(txn.ai_confidence))
+            )
+          ))
         )
-      ))) : h(EmptyState, null, "No transactions to show.")
+      ) : h(EmptyState, null, "No transactions to show.")
     );
   }
 
   function CustomerAlertsPanel({ alerts }) {
     return h("div", { className: "card table-card" },
-      h("h3", null, "AML Alerts"),
-      alerts.length ? h("ul", null, alerts.map((alert, index) => (
-        h("li", { key: alert.id || index },
-          h("strong", null, `Alert #${alert.id || ""}`),
-          ` | Tx #${alert.transaction_id || ""} | ${alert.timestamp || ""} | `,
-          h("span", { className: "status-pill alert" }, alert.risk_level || "risk"),
-          ` | ${alert.reason || ""}`
+      h(PanelHeading, { title: "AML Alerts" }),
+      alerts.length ? h("table", { className: "data-table" },
+        h("thead", null,
+          h("tr", null, ["Alert", "Transaction", "Risk", "Reason"].map((head) => h("th", { key: head }, head)))
+        ),
+        h("tbody", null,
+          alerts.map((alert, index) => h("tr", { key: alert.id || index },
+            h("td", null,
+              h("strong", null, `#${alert.id || ""}`),
+              h("span", { className: "muted-line block-line" }, shortTime(alert.timestamp))
+            ),
+            h("td", null, `#${alert.transaction_id || ""}`),
+            h("td", null, h("span", { className: riskClass(alert.risk_level) }, labelize(alert.risk_level || "risk"))),
+            h("td", null, alert.reason || "")
+          )
         )
-      ))) : h(EmptyState, null, "No alerts for this account.")
+      )) : h(EmptyState, null, "No alerts for this account.")
     );
   }
 
@@ -301,18 +354,19 @@
     });
 
     const metricItems = [
-      { label: "Users", value: stats.total_users || users.length },
-      { label: "Transactions", value: stats.total_transactions || 0 },
-      { label: "Open alerts", value: stats.open_alerts || 0 },
-      { label: "Draft SARs", value: stats.pending_sars || 0 },
-      { label: "Pending CTRs", value: stats.pending_ctrs || 0 },
+      { label: "Users", value: stats.total_users || users.length, caption: "registered accounts" },
+      { label: "Transactions", value: stats.total_transactions || 0, caption: "monitored ledger" },
+      { label: "Open alerts", value: stats.open_alerts || 0, caption: "active cases" },
+      { label: "Draft SARs", value: stats.pending_sars || 0, caption: "pending review" },
+      { label: "Pending CTRs", value: stats.pending_ctrs || 0, caption: "currency reports" },
     ];
 
     return h(window.React.Fragment, null,
       h(StatGrid, { items: metricItems }),
       h("section", { className: "react-dashboard-grid" },
-        h("div", { className: "card" },
-          h("h3", null, "Transaction Simulator"),
+        h("div", { className: "card action-card" },
+          h(PanelHeading, { title: "Transaction Simulator", meta: h("span", { className: "status-pill" }, "Customers only") }),
+          h("p", { className: "muted-line" }, "Generate realistic deposits, withdrawals, and transfers using registered customer accounts."),
           h("form", { method: "post", action: "/admin/generate-transactions" },
             h("label", null, "Number of Transactions"),
             h("select", { name: "count", defaultValue: "100" },
@@ -323,8 +377,8 @@
             h("button", { type: "submit" }, "Generate Transactions")
           )
         ),
-        h("div", { className: "card" },
-          h("h3", null, "Manage Users"),
+        h("div", { className: "card action-card" },
+          h(PanelHeading, { title: "Manage Users" }),
           h("form", { method: "post", action: "/admin" },
             h("input", { type: "hidden", name: "action", value: "update_role" }),
             h("label", null, "User"),
@@ -340,8 +394,8 @@
             h("button", { type: "submit" }, "Update User")
           )
         ),
-        h("div", { className: "card" },
-          h("h3", null, "Watchlist Entry"),
+        h("div", { className: "card action-card" },
+          h(PanelHeading, { title: "Watchlist Entry" }),
           h("form", { method: "post", action: "/admin" },
             h("input", { type: "hidden", name: "action", value: "add_watchlist" }),
             h("label", null, "Name"),
@@ -367,7 +421,15 @@
       ),
       h(UsersTable, { users }),
       h("section", { className: "admin-danger-zone" },
-        h("form", { method: "post", action: "/admin/clear-transactions" },
+        h("form", {
+          method: "post",
+          action: "/admin/clear-transactions",
+          onSubmit: (event) => {
+            if (!window.confirm("Clear all transactions, alerts, reports, recent activity, and the AI model?")) {
+              event.preventDefault();
+            }
+          },
+        },
           h("button", { type: "submit", className: "danger-button" }, "Clear All Transactions")
         )
       )
@@ -376,10 +438,12 @@
 
   function ActivityPanel({ activity }) {
     return h("div", { className: "card table-card" },
-      h("h3", null, "Recent Activity"),
+      h(PanelHeading, { title: "Recent Activity" }),
       activity.length ? h("ul", null, activity.map((event, index) => (
-        h("li", { key: `${event.timestamp || ""}-${index}` },
-          `${event.timestamp || ""} - ${event.action || ""} - ${event.detail || ""}`
+        h("li", { className: "activity-item", key: `${event.timestamp || ""}-${index}` },
+          h("strong", null, labelize(event.action || "")),
+          h("span", { className: "muted-line block-line" }, shortTime(event.timestamp)),
+          h("p", null, event.detail || "")
         )
       ))) : h(EmptyState, null, "No activity recorded yet.")
     );
@@ -387,22 +451,31 @@
 
   function AdminTransactionsPanel({ transactions }) {
     return h("div", { className: "card table-card" },
-      h("h3", null, "Recent Transactions"),
-      transactions.length ? h("ul", null, transactions.map((txn, index) => (
-        h("li", { key: txn.id || index },
-          `${txn.timestamp || ""} - ${txn.sender_account || ""} -> ${txn.receiver_account || ""} - ${money(txn.amount)} - `,
-          h("span", { className: riskClass(txn.risk_level) }, txn.risk_level || "normal")
+      h(PanelHeading, { title: "Recent Transactions" }),
+      transactions.length ? h("table", { className: "data-table" },
+        h("thead", null,
+          h("tr", null, ["Time", "Route", "Amount", "Risk"].map((head) => h("th", { key: head }, head)))
+        ),
+        h("tbody", null,
+          transactions.map((txn, index) => h("tr", { key: txn.id || index },
+            h("td", null, shortTime(txn.timestamp)),
+            h("td", null, `${txn.sender_account || ""} -> ${txn.receiver_account || ""}`),
+            h("td", null, money(txn.amount)),
+            h("td", null, h("span", { className: riskClass(txn.risk_level) }, labelize(txn.risk_level)))
+          ))
         )
-      ))) : h(EmptyState, null, "No transactions to show.")
+      ) : h(EmptyState, null, "No transactions to show.")
     );
   }
 
   function WatchlistPanel({ watchlist }) {
     return h("div", { className: "card table-card" },
-      h("h3", null, "Watchlist"),
+      h(PanelHeading, { title: "Watchlist" }),
       watchlist.length ? h("ul", null, watchlist.map((entry, index) => (
-        h("li", { key: entry.id || index },
-          `${entry.name || ""} - ${entry.list_type || "internal"} - ${entry.reason || "No reason recorded"}`
+        h("li", { className: "activity-item", key: entry.id || index },
+          h("strong", null, entry.name || ""),
+          h("span", { className: "status-pill block-fit" }, entry.list_type || "internal"),
+          h("p", null, entry.reason || "No reason recorded")
         )
       ))) : h(EmptyState, null, "No watchlist entries.")
     );
@@ -410,8 +483,8 @@
 
   function UsersTable({ users }) {
     return h("section", { className: "card table-card" },
-      h("h3", null, "Registered Users"),
-      h("table", null,
+      h(PanelHeading, { title: "Registered Users" }),
+      h("table", { className: "data-table" },
         h("thead", null,
           h("tr", null,
             ["ID", "Username", "Email", "Account Number", "Role", "Balance", "KYC", "Created"].map((head) => h("th", { key: head }, head))
@@ -486,15 +559,15 @@
     }, [initialData.total_count, initialData.page_size]);
 
     const metricItems = [
-      { label: "Open alerts", value: stats.open_alerts || alerts.length },
-      { label: "High risk today", value: stats.high_risk_today || 0 },
-      { label: "Draft SARs", value: stats.pending_sars || 0 },
-      { label: "Pending CTRs", value: stats.pending_ctrs || 0 },
+      { label: "Open alerts", value: stats.open_alerts || alerts.length, caption: "needs review" },
+      { label: "High risk today", value: stats.high_risk_today || 0, caption: "new severe activity" },
+      { label: "Draft SARs", value: stats.pending_sars || 0, caption: "case narratives" },
+      { label: "Pending CTRs", value: stats.pending_ctrs || 0, caption: "currency reports" },
     ];
 
     return h(window.React.Fragment, null,
       h(StatGrid, { items: metricItems }),
-      h("section", { className: "card react-filter-card" },
+      h("section", { className: "card react-filter-card action-card" },
         h("form", { method: "get" },
           h("label", null, "Show"),
           h("select", { name: "filter", defaultValue: filterValue },
@@ -513,12 +586,12 @@
         h(AlertsPanel, { alerts })
       ),
       h("section", { className: "card table-card" },
-        h("div", { className: "panel-heading-row" },
-          h("h3", null, "Live Compliance Feed"),
-          h("span", { className: "status-pill" }, status)
-        ),
+        h(PanelHeading, { title: "Live Compliance Feed", meta: h(LiveStatus, null, status) }),
         feed.length ? h("ul", null, feed.map((event, index) => (
-          h("li", { key: `${event.timestamp}-${index}` }, `${event.timestamp} - ${event.text}`)
+          h("li", { className: "activity-item", key: `${event.timestamp}-${index}` },
+            h("strong", null, event.timestamp),
+            h("p", null, event.text)
+          )
         ))) : h(EmptyState, null, "Waiting for live events.")
       )
     );
@@ -526,35 +599,56 @@
 
   function ComplianceTransactionsPanel({ transactions }) {
     return h("div", { className: "card table-card" },
-      h("h3", null, "Transactions"),
-      transactions.length ? h("ul", null, transactions.map((txn, index) => (
-        h("li", { key: txn.id || index },
-          h("strong", null, `Tx #${txn.id || ""}`),
-          ` | ${txn.timestamp || ""} | ${txn.transaction_type || txn.type || ""} | ${money(txn.amount)}`,
-          h("br"),
-          "Final risk ",
-          h("span", { className: riskClass(txn.risk_level) }, txn.risk_level || "normal"),
-          ` | Score ${score(txn.risk_score)}`,
-          h("br"),
-          h("span", { className: "muted-line" },
-            `Rules risk: ${txn.rule_level || "normal"} / ${score(txn.rule_score)} | AI behavior risk: ${txn.ai_risk_level || "unavailable"} / ${confidence(txn.ai_confidence)}`
-          )
+      h(PanelHeading, { title: "Transactions" }),
+      transactions.length ? h("table", { className: "data-table" },
+        h("thead", null,
+          h("tr", null, ["Transaction", "Type", "Amount", "Risk", "Rules / AI"].map((head) => h("th", { key: head }, head)))
+        ),
+        h("tbody", null,
+          transactions.map((txn, index) => h("tr", { key: txn.id || index },
+            h("td", null,
+              h("strong", null, `#${txn.id || ""}`),
+              h("span", { className: "muted-line block-line" }, shortTime(txn.timestamp))
+            ),
+            h("td", null, labelize(txn.transaction_type || txn.type)),
+            h("td", null, money(txn.amount)),
+            h("td", null,
+              h("span", { className: riskClass(txn.risk_level) }, labelize(txn.risk_level)),
+              h("span", { className: "muted-line block-line" }, `Score ${score(txn.risk_score)}`)
+            ),
+            h("td", null,
+              h("span", null, `${labelize(txn.rule_level || "normal")} / ${score(txn.rule_score)}`),
+              h("span", { className: "muted-line block-line" }, `${labelize(txn.ai_risk_level || "unavailable")} / ${confidence(txn.ai_confidence)}`)
+            )
+          ))
         )
-      ))) : h(EmptyState, null, "No transactions match this filter.")
+      ) : h(EmptyState, null, "No transactions match this filter.")
     );
   }
 
   function AlertsPanel({ alerts }) {
     return h("div", { className: "card table-card" },
-      h("h3", null, "Alerts"),
-      alerts.length ? h("ul", null, alerts.map((alert, index) => (
-        h("li", { key: alert.id || index },
-          h("strong", null, `Alert #${alert.id || ""}`),
-          ` | Tx #${alert.transaction_id || ""} | ${alert.timestamp || ""} | ${alert.account_number || ""} | `,
-          h("span", { className: "status-pill alert" }, alert.risk_level || "risk"),
-          ` | ${alert.reason || ""}`
+      h(PanelHeading, { title: "Alerts" }),
+      alerts.length ? h("table", { className: "data-table" },
+        h("thead", null,
+          h("tr", null, ["Alert", "Account", "Risk", "Reason", "Action"].map((head) => h("th", { key: head }, head)))
+        ),
+        h("tbody", null,
+          alerts.map((alert, index) => h("tr", { key: alert.id || index },
+            h("td", null,
+              h("strong", null, `#${alert.id || ""}`),
+              h("span", { className: "muted-line block-line" }, `Tx #${alert.transaction_id || ""}`)
+            ),
+            h("td", null, alert.account_number || ""),
+            h("td", null, h("span", { className: riskClass(alert.risk_level) }, labelize(alert.risk_level || "risk"))),
+            h("td", null, alert.reason || ""),
+            h("td", null, alert.id
+              ? h("a", { className: "action-link", href: `/compliance/alert/${alert.id}` }, "Review")
+              : h("span", { className: "muted-line" }, "Pending")
+            )
+          )
         )
-      ))) : h(EmptyState, null, "No open alerts.")
+      )) : h(EmptyState, null, "No open alerts.")
     );
   }
 
