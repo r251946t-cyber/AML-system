@@ -641,19 +641,127 @@ def _simulation_timestamp(hour):
     ).isoformat()
 
 
+NORMAL_TRANSACTION_SCENARIOS = [
+    {
+        "type": "deposit",
+        "amount": (850, 4200),
+        "channel": "ach",
+        "hours": list(range(8, 17)),
+        "description": "Payroll credit from registered employer",
+    },
+    {
+        "type": "withdraw",
+        "amount": (12, 180),
+        "channel": "card",
+        "hours": list(range(7, 22)),
+        "description": "Point-of-sale card purchase at local merchant",
+    },
+    {
+        "type": "withdraw",
+        "amount": (20, 500),
+        "channel": "atm",
+        "hours": list(range(6, 23)),
+        "description": "ATM cash withdrawal at bank terminal",
+    },
+    {
+        "type": "transfer",
+        "amount": (35, 950),
+        "channel": "mobile",
+        "hours": list(range(7, 22)),
+        "description": "Mobile transfer for household payment",
+    },
+    {
+        "type": "transfer",
+        "amount": (120, 1800),
+        "channel": "online",
+        "hours": list(range(8, 20)),
+        "description": "Online bill payment to regular beneficiary",
+    },
+]
+
+SUSPICIOUS_TRANSACTION_SCENARIOS = [
+    {
+        "type": "deposit",
+        "amount": (9200, 9900),
+        "channel": "branch",
+        "hours": list(range(9, 16)),
+        "description": "Cash deposit just below currency reporting threshold",
+        "reason": "Possible structuring: cash deposit below the CTR threshold",
+    },
+    {
+        "type": "transfer",
+        "amount": (1400, 6800),
+        "channel": "online",
+        "hours": [0, 1, 2, 3, 22, 23],
+        "description": "Unusual off-hours transfer to recently added beneficiary",
+        "reason": "Off-hours transfer pattern inconsistent with normal customer activity",
+    },
+    {
+        "type": "withdraw",
+        "amount": (1500, 6500),
+        "channel": "atm",
+        "hours": [0, 1, 2, 3, 4, 22, 23],
+        "description": "High-value ATM cash withdrawal outside normal banking hours",
+        "reason": "Large cash withdrawal during unusual hours",
+    },
+    {
+        "type": "transfer",
+        "amount": (2500, 7400),
+        "channel": "mobile",
+        "hours": list(range(6, 23)),
+        "description": "Multiple rapid mobile transfers to another customer account",
+        "reason": "Potential layering through repeated customer-to-customer transfers",
+    },
+]
+
+SUPER_SUSPICIOUS_TRANSACTION_SCENARIOS = [
+    {
+        "type": "deposit",
+        "amount": (10000, 28000),
+        "channel": "branch",
+        "hours": list(range(9, 16)),
+        "description": "Large cash deposit requiring currency transaction review",
+        "reason": "Cash transaction exceeds the CTR threshold and requires enhanced review",
+    },
+    {
+        "type": "transfer",
+        "amount": (12000, 52000),
+        "channel": "online",
+        "hours": [0, 1, 2, 3, 23],
+        "description": "High-value off-hours transfer to a rarely used beneficiary",
+        "reason": "High-value off-hours transfer with strong layering indicators",
+    },
+    {
+        "type": "withdraw",
+        "amount": (10000, 24000),
+        "channel": "branch",
+        "hours": list(range(9, 16)),
+        "description": "Large over-the-counter cash withdrawal",
+        "reason": "Large cash withdrawal meets threshold for immediate compliance review",
+    },
+]
+
+
+def _scenario_amount(low, high, label):
+    amount = random.triangular(low, high, low + ((high - low) * 0.35))
+    if label == "normal":
+        return round(amount, 2)
+    if low >= 9000:
+        return round(amount / 50) * 50
+    return round(amount / 10) * 10
+
+
 def _simulation_transaction(label, users):
     if label == "normal":
-        tx_type = random.choices(["deposit", "withdraw", "transfer"], weights=[35, 25, 40], k=1)[0]
-        amount = round(random.uniform(10, 950), 2)
-        hour = random.randint(7, 20)
+        scenario = random.choice(NORMAL_TRANSACTION_SCENARIOS)
     elif label == "suspicious":
-        tx_type = random.choices(["transfer", "withdraw", "deposit"], weights=[70, 20, 10], k=1)[0]
-        amount = round(random.uniform(1200, 6500), 2)
-        hour = random.choice([0, 1, 2, 3, 4, 22, 23, random.randint(6, 21)])
+        scenario = random.choice(SUSPICIOUS_TRANSACTION_SCENARIOS)
     else:
-        tx_type = random.choices(["transfer", "withdraw", "deposit"], weights=[75, 20, 5], k=1)[0]
-        amount = round(random.uniform(8500, 25000), 2)
-        hour = random.choice([0, 1, 2, 3, 23])
+        scenario = random.choice(SUPER_SUSPICIOUS_TRANSACTION_SCENARIOS)
+
+    tx_type = scenario["type"]
+    amount = _scenario_amount(*scenario["amount"], label)
+    hour = random.choice(scenario["hours"])
 
     sender = random.choice(users)
     recipient = sender
@@ -661,15 +769,18 @@ def _simulation_transaction(label, users):
         recipient = random.choice([user for user in users if user["id"] != sender["id"]])
 
     timestamp = _simulation_timestamp(hour)
-    return sender, recipient, tx_type, amount, timestamp
+    return (
+        sender, recipient, tx_type, amount, timestamp,
+        scenario["channel"], scenario["description"], scenario.get("reason"),
+    )
 
 
-def _simulation_reason(label, amount, tx_type):
+def _simulation_reason(label, amount, tx_type, scenario_reason=None):
     if label == "normal":
-        return "AI training label: normal customer banking activity"
+        return "Routine customer activity consistent with known banking behaviour"
     if label == "suspicious":
-        return f"AI training label: suspicious {tx_type} pattern involving ${amount:,.2f}"
-    return f"AI training label: super suspicious {tx_type} pattern involving ${amount:,.2f}"
+        return f"{scenario_reason or 'Suspicious transaction pattern'} involving a {tx_type} of ${amount:,.2f}"
+    return f"{scenario_reason or 'High-risk AML pattern'} involving a {tx_type} of ${amount:,.2f}"
 
 
 def create_alert_if_needed(conn, transaction_id, account_number, risk_score, risk_level, reason, rules_json, timestamp):
@@ -1688,11 +1799,14 @@ def generate_transactions():
 
     generated = {"normal": 0, "suspicious": 0, "super_suspicious": 0}
     for label in _simulation_plan(count):
-        sender, recipient, tx_type, amount, timestamp = _simulation_transaction(label, users)
+        (
+            sender, recipient, tx_type, amount, timestamp,
+            channel, description, scenario_reason,
+        ) = _simulation_transaction(label, users)
         sender_account = sender["account_number"]
         receiver_account = recipient["account_number"] if tx_type == "transfer" else sender_account
         risk_score = AI_RISK_SCORES[label]
-        reason = _simulation_reason(label, amount, tx_type)
+        reason = _simulation_reason(label, amount, tx_type, scenario_reason)
         rules_json = json.dumps([{
             "id": "AI_SIM",
             "typology": label.replace("_", " ").title(),
@@ -1708,14 +1822,13 @@ def generate_transactions():
                 currency, channel, timestamp, status, risk_score, risk_level,
                 rule_score, rule_level, rule_reason, ai_risk_level, ai_confidence, ai_reason, description,
                 rules_triggered, ctr_required, sar_required)
-            VALUES (?,?,?,?,'USD','simulator',?,'Completed',?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,'Completed',?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                sender_account, receiver_account, amount, tx_type, timestamp,
+                sender_account, receiver_account, amount, tx_type, "USD", channel, timestamp,
                 risk_score, label,
                 risk_score, label, reason, label, 1.0,
-                f"Simulator label: {label.replace('_', ' ')}",
-                reason, rules_json, ctr_required, sar_required,
+                reason, description, rules_json, ctr_required, sar_required,
             ),
         )
         transaction_id = get_last_insert_id(get_db())

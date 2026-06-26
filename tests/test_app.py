@@ -410,11 +410,20 @@ def test_admin_generates_simulated_transactions_and_trains_ai(client):
             "SELECT COUNT(*) as c FROM transactions WHERE risk_level='super_suspicious'"
         ).fetchone()["c"]
         alerts = conn.execute("SELECT COUNT(*) as c FROM alerts").fetchone()["c"]
-        simulator_rows = conn.execute(
-            "SELECT COUNT(*) as c FROM transactions WHERE channel='simulator'"
+        realistic_channel_rows = conn.execute(
+            """
+            SELECT COUNT(*) as c FROM transactions
+            WHERE channel IN ('ach','atm','branch','card','mobile','online')
+            """
+        ).fetchone()["c"]
+        distinct_channels = conn.execute(
+            "SELECT COUNT(DISTINCT channel) as c FROM transactions"
+        ).fetchone()["c"]
+        realistic_descriptions = conn.execute(
+            "SELECT COUNT(*) as c FROM transactions WHERE description NOT LIKE 'Simulator label:%'"
         ).fetchone()["c"]
         newest_timestamp = conn.execute(
-            "SELECT MAX(timestamp) as t FROM transactions WHERE channel='simulator'"
+            "SELECT MAX(timestamp) as t FROM transactions"
         ).fetchone()["t"]
 
     assert total == 100
@@ -422,7 +431,9 @@ def test_admin_generates_simulated_transactions_and_trains_ai(client):
     assert suspicious == 15
     assert super_suspicious == 5
     assert alerts == 20
-    assert simulator_rows == 100
+    assert realistic_channel_rows == 100
+    assert distinct_channels > 1
+    assert realistic_descriptions == 100
     assert datetime.fromisoformat(newest_timestamp) <= datetime.now(timezone.utc)
     assert os.path.exists(ai_detector.MODEL_PATH)
 
