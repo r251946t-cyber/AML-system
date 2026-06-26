@@ -126,8 +126,10 @@ html[data-theme="light"] .topbar {
 .brand-block { display: flex; align-items: center; gap: 0.85rem; }
 
 .brand-mark {
-  width: 46px;
+  min-width: 74px;
+  width: auto;
   height: 46px;
+  padding: 0 0.62rem;
   display: grid;
   place-items: center;
   border-radius: 8px;
@@ -396,8 +398,10 @@ html[data-theme="light"] .stat-chip {
 .auth-brand-inline p { margin: 0; color: var(--zb-muted); }
 
 .brand-mark--small {
+  min-width: 42px;
   width: 42px;
   height: 42px;
+  padding: 0;
   border-radius: 8px;
   font-size: 0.95rem;
 }
