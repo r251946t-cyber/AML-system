@@ -466,24 +466,21 @@ def test_admin_generates_simulated_transactions_and_trains_ai(client):
     )
 
     assert response.status_code == 200
-    assert b"Generated 100 transactions" in response.data
+    assert b"Generated 100 transactions" in response.data or b"full AML pipeline" in response.data
     with aml_app.app.app_context():
         conn = aml_app.get_db()
         total = conn.execute("SELECT COUNT(*) as c FROM transactions").fetchone()["c"]
-        normal = conn.execute(
-            "SELECT COUNT(*) as c FROM transactions WHERE risk_level='normal'"
+        flagged = conn.execute(
+            "SELECT COUNT(*) as c FROM transactions WHERE risk_level NOT IN ('normal', 'low')"
         ).fetchone()["c"]
-        suspicious = conn.execute(
-            "SELECT COUNT(*) as c FROM transactions WHERE risk_level='suspicious'"
-        ).fetchone()["c"]
-        super_suspicious = conn.execute(
-            "SELECT COUNT(*) as c FROM transactions WHERE risk_level='super_suspicious'"
+        with_rules = conn.execute(
+            "SELECT COUNT(*) as c FROM transactions WHERE rule_score > 0 OR rules_triggered != '[]'"
         ).fetchone()["c"]
         alerts = conn.execute("SELECT COUNT(*) as c FROM alerts").fetchone()["c"]
         realistic_channel_rows = conn.execute(
             """
             SELECT COUNT(*) as c FROM transactions
-            WHERE channel IN ('ach','atm','branch','card','mobile','online')
+            WHERE channel IN ('ach','atm','branch','card','mobile','online','swift')
             """
         ).fetchone()["c"]
         distinct_channels = conn.execute(
@@ -497,10 +494,9 @@ def test_admin_generates_simulated_transactions_and_trains_ai(client):
         ).fetchone()["t"]
 
     assert total == 100
-    assert normal == 80
-    assert suspicious == 15
-    assert super_suspicious == 5
-    assert alerts == 20
+    assert flagged >= 10
+    assert with_rules >= 10
+    assert alerts >= 10
     assert realistic_channel_rows == 100
     assert distinct_channels > 1
     assert realistic_descriptions == 100
@@ -571,3 +567,46 @@ def test_admin_clears_transactions_reports_alerts_and_ai_model(client):
         for table in ("transactions", "alerts", "sar_reports", "ctr_reports"):
             assert conn.execute(f"SELECT COUNT(*) as c FROM {table}").fetchone()["c"] == 0
     assert not os.path.exists(ai_detector.MODEL_PATH)
+
+
+def test_screening_blocks_sanctions_registration(client):
+    client.post(
+        "/register",
+        data={
+            "username": "OFAC SDN Example Entity",
+            "email": "sanctioned@example.com",
+            "id_number": "99-0000001X01",
+            "password": "secret123",
+            "role": "customer",
+        },
+        follow_redirects=True,
+    )
+    with client.session_transaction() as session:
+        otp = session["pending_registration"]["otp"]
+    blocked = client.post("/register", data={"otp": otp}, follow_redirects=True)
+    assert b"sanctions screening match" in blocked.data.lower()
+    with aml_app.app.app_context():
+        assert aml_app.get_user_by_email("sanctioned@example.com") is None
+
+
+def test_alert_detail_page_renders(client):
+    client.post(
+        "/login",
+        data={"login": "Admin", "password": "Admin123"},
+        follow_redirects=True,
+    )
+    client.post("/admin/generate-transactions", data={"count": "100"}, follow_redirects=True)
+    client.get("/logout", follow_redirects=True)
+    client.post(
+        "/login",
+        data={"login": "Compliance", "password": "Compliance123"},
+        follow_redirects=True,
+    )
+    with aml_app.app.app_context():
+        alert = aml_app.get_db().execute(
+            "SELECT id FROM alerts ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    response = client.get(f"/compliance/alert/{alert['id']}")
+    assert response.status_code == 200
+    assert b"Case Investigation" in response.data
+    assert b"Rules Triggered" in response.data

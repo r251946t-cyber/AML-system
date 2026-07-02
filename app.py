@@ -19,6 +19,7 @@ New capabilities vs prototype:
   • API endpoints for external SIEM / BI integration
 """
 
+import ai_detector
 import json
 import logging
 import os
@@ -51,10 +52,17 @@ from flask import (
 from flask_socketio import SocketIO
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from ai_detector import PROFILE_FEATURE_DEFAULTS, delete_ai_model, predict_risk_level, train_ai_model
-from aml_logic import analyze_transaction, get_triggered_rules
+from ai_detector import (
+    PROFILE_FEATURE_DEFAULTS,
+    delete_ai_model,
+    get_model_metadata,
+    predict_risk_level,
+    train_ai_model,
+)
+from aml_logic import RuleResult, analyze_transaction, get_triggered_rules
 from config import DevelopmentConfig, ProductionConfig, TestingConfig
 from realtime import RealtimeBroker
+from screening import is_registration_blocked, screen_entity, screening_summary
 
 load_dotenv()
 
@@ -93,16 +101,16 @@ AI_RISK_SCORES = {
 
 STAFF_ACCOUNTS = {
     "Admin": {
-        "password": "Admin123",
+        "password": os.environ.get("ADMIN_PASSWORD", "Admin123"),
         "role": "admin",
-        "email": "admin@example.com",
+        "email": os.environ.get("ADMIN_EMAIL", "admin@example.com"),
         "id_number": "63-1000001A01",
         "account_number": "ACC1001",
     },
     "Compliance": {
-        "password": "Compliance123",
+        "password": os.environ.get("COMPLIANCE_PASSWORD", "Compliance123"),
         "role": "compliance",
-        "email": "compliance@example.com",
+        "email": os.environ.get("COMPLIANCE_EMAIL", "compliance@example.com"),
         "id_number": "63-1000002A02",
         "account_number": "ACC1002",
     },
@@ -271,6 +279,8 @@ def get_schema_sql():
         rules_triggered {long_text_type},
         ctr_required INTEGER DEFAULT 0,
         sar_required INTEGER DEFAULT 0,
+        destination_country {text_type} DEFAULT 'ZW',
+        screening_hits {long_text_type},
         reviewed_by {text_type},
         reviewed_at {text_type}
     );
@@ -357,7 +367,8 @@ def _migrate_sqlite(conn):
                          "rule_reason TEXT", "ai_risk_level TEXT", "ai_confidence REAL DEFAULT 0",
                          "ai_reason TEXT",
                          "rules_triggered TEXT DEFAULT '[]'", "ctr_required INTEGER DEFAULT 0",
-                         "sar_required INTEGER DEFAULT 0", "reviewed_by TEXT", "reviewed_at TEXT"],
+                         "sar_required INTEGER DEFAULT 0", "destination_country TEXT DEFAULT 'ZW'",
+                         "screening_hits TEXT", "reviewed_by TEXT", "reviewed_at TEXT"],
         "alerts": ["rules_triggered TEXT DEFAULT '[]'", "status TEXT DEFAULT 'open'",
                    "assigned_to TEXT", "case_notes TEXT", "resolved_at TEXT", "resolved_by TEXT"],
     }
@@ -443,8 +454,37 @@ def seed_demo_data():
                 """,
                 (username, email, id_number, pwd_hash, role, acct, existing["id"]),
             )
+    _seed_watchlist(conn)
     conn.commit()
     conn.close()
+
+
+def _seed_watchlist(conn):
+    """Seed industry-standard sanctions and PEP entries for demonstration screening."""
+    now = datetime.now(timezone.utc).isoformat()
+    defaults = [
+        ("OFAC SDN — Example Entity", "99-0000001X01", None, "sanctions",
+         "OFAC Specially Designated Nationals list match (demo entry)"),
+        ("UN Consolidated Sanctions — Demo", "99-0000002X02", None, "sanctions",
+         "UN Security Council consolidated sanctions list (demo entry)"),
+        ("PEP — Senior Government Official", "88-0000001P01", None, "pep",
+         "Politically Exposed Person — senior government official"),
+        ("Internal Fraud Watch", None, "ACC9999", "internal",
+         "Internal fraud investigation — account frozen"),
+    ]
+    for name, id_num, acct, list_type, reason in defaults:
+        existing = conn.execute(
+            "SELECT id FROM watchlist WHERE name=? AND list_type=?",
+            (name, list_type),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO watchlist (name, id_number, account_number, list_type, reason, added_by, added_at)
+                VALUES (?,?,?,?,?,'system',?)
+                """,
+                (name, id_num, acct, list_type, reason, now),
+            )
 
 
 # ───────────────────────────────────────────────────────────── Utilities ──
@@ -735,10 +775,11 @@ SUPER_SUSPICIOUS_TRANSACTION_SCENARIOS = [
     {
         "type": "transfer",
         "amount": (12000, 52000),
-        "channel": "online",
+        "channel": "swift",
         "hours": [0, 1, 2, 3, 23],
-        "description": "High-value off-hours transfer to a rarely used beneficiary",
-        "reason": "High-value off-hours transfer with strong layering indicators",
+        "destination_country": "IR",
+        "description": "High-value SWIFT transfer to high-risk jurisdiction",
+        "reason": "High-value off-hours transfer to FATF grey-list jurisdiction",
     },
     {
         "type": "withdraw",
@@ -778,9 +819,10 @@ def _simulation_transaction(label, users):
         recipient = random.choice([user for user in users if user["id"] != sender["id"]])
 
     timestamp = _simulation_timestamp(hour)
+    dest_country = scenario.get("destination_country", "ZW")
     return (
         sender, recipient, tx_type, amount, timestamp,
-        scenario["channel"], scenario["description"], scenario.get("reason"),
+        scenario["channel"], scenario["description"], scenario.get("reason"), dest_country,
     )
 
 
@@ -915,16 +957,21 @@ def _ai_training_rows(rows):
 def _train_ai_model_from_db(conn, emit_events=True):
     rows = conn.execute(
         """
-        SELECT id, sender_account, receiver_account, amount, transaction_type, timestamp, risk_level
+        SELECT id, sender_account, receiver_account, amount, transaction_type,
+               timestamp, risk_level, risk_score, channel
         FROM transactions
+        WHERE description != 'Initiated' OR risk_score > 0
         ORDER BY timestamp ASC, id ASC
         """
     ).fetchall()
     model = train_ai_model(_ai_training_rows(rows))
     if emit_events:
+        meta = get_model_metadata()
         broadcast_event("ai_model", {
             "trained": model is not None,
             "training_rows": len(rows),
+            "version": meta.get("version", "unknown"),
+            "cross_val_f1": meta.get("cross_val_f1_weighted"),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
     return model
@@ -980,7 +1027,8 @@ def _risk_level_from_score(score):
 def _is_mandatory_compliance_hit(triggered_rules, rule_reason):
     return (
         "[CTR REQUIRED]" in (rule_reason or "")
-        or any(rule.rule_id == "R09" for rule in triggered_rules)
+        or any(getattr(r, "rule_id", "") == "R09" for r in triggered_rules)
+        or any(getattr(r, "rule_id", "") == "R14" for r in triggered_rules)
     )
 
 
@@ -1060,17 +1108,62 @@ def process_transaction_event(
     timestamp,
     account_number=None,
     emit_events=True,
+    destination_country="ZW",
 ):
+    sender_user = conn.execute(
+        "SELECT username, id_number, pep_flag FROM users WHERE account_number=?",
+        (sender_account,),
+    ).fetchone()
+    receiver_user = conn.execute(
+        "SELECT username, id_number, pep_flag FROM users WHERE account_number=?",
+        (receiver_account,),
+    ).fetchone()
+
+    screening_hits = []
+    for party, user_row, acct in (
+        ("sender", sender_user, sender_account),
+        ("receiver", receiver_user, receiver_account),
+    ):
+        if user_row:
+            party_hits = screen_entity(
+                conn,
+                name=user_row["username"],
+                id_number=user_row["id_number"],
+                account_number=acct,
+            )
+            screening_hits.extend(party_hits)
+
+    screen_delta, screen_reason, screen_json = screening_summary(screening_hits)
+
     rule_score, rule_level, rule_reason = analyze_transaction(
-        conn, transaction_type, amount, sender_account, receiver_account, timestamp
+        conn, transaction_type, amount, sender_account, receiver_account, timestamp,
+        destination_country=destination_country,
     )
+    if screen_delta:
+        rule_score = min(100, rule_score + screen_delta)
+        rule_level = _risk_level_from_score(rule_score)
+        rule_reason = f"{screen_reason}. {rule_reason}"
+        if any(h.list_type == "sanctions" for h in screening_hits):
+            rule_reason = "[SAR REVIEW] " + rule_reason
+
     triggered = get_triggered_rules(
-        conn, transaction_type, amount, sender_account, receiver_account, timestamp
+        conn, transaction_type, amount, sender_account, receiver_account, timestamp,
+        destination_country=destination_country,
     )
+    if screen_delta:
+        triggered.append(RuleResult(
+            rule_id="R14",
+            triggered=True,
+            score_delta=screen_delta,
+            reason=screen_reason,
+            severity="critical" if any(h.list_type == "sanctions" for h in screening_hits) else "warning",
+            typology="Watchlist / PEP Screening",
+        ))
+
     rules_json = json.dumps([
-        {"id": r.rule_id, "typology": r.typology, "score_delta": r.score_delta, "reason": r.reason}
+        {"id": r.rule_id, "typology": getattr(r, "typology", ""), "score_delta": r.score_delta, "reason": r.reason}
         for r in triggered
-    ])
+    ] + screen_json)
 
     ai_transaction = {
         "sender_account": sender_account,
@@ -1084,7 +1177,11 @@ def process_transaction_event(
             conn, transaction_id, sender_account, receiver_account, amount, timestamp
         )
     )
-    ai_level, ai_confidence = predict_risk_level(ai_transaction)
+    tx_row = conn.execute("SELECT channel FROM transactions WHERE id=?", (transaction_id,)).fetchone()
+    if tx_row and tx_row["channel"]:
+        ai_transaction["channel"] = tx_row["channel"]
+
+    ai_level, ai_confidence, _anomaly = predict_risk_level(ai_transaction)
     risk_score, risk_level, reason, ai_reason = _combine_rule_ai_risk(
         rule_score, rule_level, rule_reason, triggered, ai_level, ai_confidence
     )
@@ -1099,13 +1196,15 @@ def process_transaction_event(
         UPDATE transactions
         SET risk_score=?, risk_level=?, rule_score=?, rule_level=?, rule_reason=?,
             ai_risk_level=?, ai_confidence=?, ai_reason=?, description=?, rules_triggered=?,
-            ctr_required=?, sar_required=?
+            ctr_required=?, sar_required=?, destination_country=?, screening_hits=?
         WHERE id=?
         """,
         (
             risk_score, risk_level, rule_score, rule_level, rule_reason,
             ai_level, ai_confidence, ai_reason, reason, rules_json,
-            ctr_required, sar_required, transaction_id,
+            ctr_required, sar_required, destination_country,
+            json.dumps(screen_json) if screen_json else "[]",
+            transaction_id,
         ),
     )
 
@@ -1307,12 +1406,25 @@ def register():
                 flash("Invalid verification code.")
                 return render_template("register.html", otp_step=True, email=pending.get("email"))
 
+            reg_hits = screen_entity(
+                get_db(),
+                name=pending["username"],
+                id_number=pending["id_number"],
+            )
+            if is_registration_blocked(reg_hits):
+                session.pop("pending_registration", None)
+                flash("Registration cannot proceed — sanctions screening match detected. Contact compliance.")
+                record_activity("system", "registration_blocked", f"Sanctions hit for {pending['username']}")
+                return redirect(url_for("register"))
+
             user_count = get_db().execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
             acct = f"ACC{1000 + int(user_count) + 1}"
+            pep_flag = 1 if any(h.list_type == "pep" for h in reg_hits) else 0
+            kyc_status = "pending_edd" if pep_flag else "pending"
             get_db().execute(
-                "INSERT INTO users (username,email,id_number,password_hash,role,account_number,balance,kyc_status,created_at) VALUES (?,?,?,?,?,?,5000,'pending',?)",
+                "INSERT INTO users (username,email,id_number,password_hash,role,account_number,balance,kyc_status,pep_flag,created_at) VALUES (?,?,?,?,?,?,5000,?,?,?)",
                 (pending["username"], pending["email"], pending["id_number"],
-                 pending["password_hash"], pending["role"], acct,
+                 pending["password_hash"], pending["role"], acct, kyc_status, pep_flag,
                  datetime.now(timezone.utc).isoformat()),
             )
             get_db().commit()
@@ -1824,57 +1936,42 @@ def generate_transactions():
         flash("No customer accounts are available for transaction generation.")
         return redirect(url_for("admin_dashboard"))
 
-    generated = {"normal": 0, "suspicious": 0, "super_suspicious": 0}
+    generated = {"normal": 0, "flagged": 0, "critical": 0}
     for label in _simulation_plan(count):
         (
             sender, recipient, tx_type, amount, timestamp,
-            channel, description, scenario_reason,
+            channel, description, _scenario_reason, dest_country,
         ) = _simulation_transaction(label, users)
         sender_account = sender["account_number"]
         receiver_account = recipient["account_number"] if tx_type == "transfer" else sender_account
-        risk_score = AI_RISK_SCORES[label]
-        reason = _simulation_reason(label, amount, tx_type, scenario_reason)
-        rules_json = json.dumps([{
-            "id": "AI_SIM",
-            "typology": label.replace("_", " ").title(),
-            "score_delta": risk_score,
-            "reason": reason,
-        }])
-        ctr_required = 1 if tx_type in ("deposit", "withdraw") and amount >= 10000 else 0
-        sar_required = 1 if label != "normal" else 0
 
         get_db().execute(
             """
             INSERT INTO transactions (sender_account, receiver_account, amount, transaction_type,
-                currency, channel, timestamp, status, risk_score, risk_level,
-                rule_score, rule_level, rule_reason, ai_risk_level, ai_confidence, ai_reason, description,
-                rules_triggered, ctr_required, sar_required)
-            VALUES (?,?,?,?,?,?,?,'Completed',?,?,?,?,?,?,?,?,?,?,?,?)
+                currency, channel, timestamp, status, risk_score, risk_level, description,
+                destination_country)
+            VALUES (?,?,?,?,?,?,?,'Completed',0,'normal',?,?)
             """,
             (
                 sender_account, receiver_account, amount, tx_type, "USD", channel, timestamp,
-                risk_score, label,
-                risk_score, label, reason, label, 1.0,
-                reason, description, rules_json, ctr_required, sar_required,
+                description, dest_country,
             ),
         )
         transaction_id = get_last_insert_id(get_db())
-        alert_id = create_alert_if_needed(
-            get_db(), transaction_id, sender_account, risk_score, label, reason, rules_json, timestamp
+
+        risk_score, risk_level, reason, alert_id = process_transaction_event(
+            get_db(), transaction_id, sender_account, receiver_account,
+            amount, tx_type, timestamp, account_number=sender_account,
+            destination_country=dest_country,
         )
-        tx_row = get_db().execute("SELECT * FROM transactions WHERE id=?", (transaction_id,)).fetchone()
-        if tx_row:
-            broadcast_event("transaction", _transaction_payload(tx_row))
-        if label != "normal":
-            broadcast_event("alert", {
-                "id": alert_id,
-                "transaction_id": transaction_id,
-                "account_number": sender_account,
-                "risk_score": risk_score,
-                "risk_level": label,
-                "reason": reason,
-                "timestamp": timestamp,
-            })
+
+        if risk_level in ("normal", "low"):
+            generated["normal"] += 1
+        elif risk_level in ("critical", "high_risk"):
+            generated["critical"] += 1
+        else:
+            generated["flagged"] += 1
+
         if tx_type == "deposit":
             get_db().execute("UPDATE users SET balance=balance+? WHERE id=?", (amount, sender["id"]))
         elif tx_type == "withdraw":
@@ -1889,8 +1986,6 @@ def generate_transactions():
             )
             get_db().execute("UPDATE users SET balance=balance+? WHERE id=?", (amount, recipient["id"]))
 
-        generated[label] += 1
-
     get_db().commit()
     for user_row in get_db().execute(
         "SELECT account_number FROM users ORDER BY id"
@@ -1899,8 +1994,8 @@ def generate_transactions():
     broadcast_event("transaction_batch", {
         "count": count,
         "normal": generated["normal"],
-        "suspicious": generated["suspicious"],
-        "super_suspicious": generated["super_suspicious"],
+        "flagged": generated["flagged"],
+        "critical": generated["critical"],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
     broadcast_stats(get_db())
@@ -1909,18 +2004,18 @@ def generate_transactions():
         admin_user["username"],
         "generate_transactions",
         (
-            f"Generated {count} simulator transactions: "
-            f"{generated['normal']} normal, {generated['suspicious']} suspicious, "
-            f"{generated['super_suspicious']} super suspicious"
+            f"Generated {count} rule-scored transactions: "
+            f"{generated['normal']} normal, {generated['flagged']} flagged, "
+            f"{generated['critical']} critical/high-risk"
         ),
     )
     if model is None:
-        flash("Transactions generated, but more labelled data is needed before AI training can complete.")
+        flash("Transactions generated through AML rule engine; AI training needs more labelled data.")
     else:
+        meta = get_model_metadata()
         flash(
-            f"Generated {count} transactions and trained AI model: "
-            f"{generated['normal']} normal, {generated['suspicious']} suspicious, "
-            f"{generated['super_suspicious']} super suspicious."
+            f"Generated {count} transactions via full AML pipeline (rules + AI + screening). "
+            f"AI model v{meta.get('version', '?')} trained on {meta.get('training_samples', '?')} samples."
         )
     return redirect(url_for("admin_dashboard"))
 
@@ -1989,6 +2084,12 @@ def reports():
 
 # ── API (JSON) ──
 
+@app.route("/api/v1/ai-model")
+@login_required("compliance", "admin")
+def api_ai_model():
+    return jsonify(get_model_metadata())
+
+
 @app.route("/api/v1/stats")
 @login_required("compliance", "admin")
 def api_stats():
@@ -2026,9 +2127,24 @@ def server_error(_):
     return render_template("error.html", message="A server error occurred. Our team has been notified."), 500
 
 
+def ensure_ai_model_ready():
+    """Bootstrap AI model on cold start using synthetic typology data."""
+    if app.config.get("TESTING"):
+        return
+    if os.path.exists(ai_detector.MODEL_PATH):
+        return
+    with app.app_context():
+        conn = connect_db()
+        try:
+            train_ai_model([])
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     init_db()
     seed_demo_data()
+    ensure_ai_model_ready()
     ensure_background_monitor()
     socketio.run(
         app,

@@ -1,5 +1,6 @@
 import json
 import os
+import uuid
 from queue import Empty, Queue
 
 from flask import Response
@@ -21,8 +22,11 @@ class RealtimeBroker:
         self.socketio = socketio
         self._subscribers = []
         self._redis_client = None
+        self._redis_pubsub = None
         self._kafka_producer = None
+        self._instance_id = str(uuid.uuid4())
         self._init_brokers()
+        self._start_redis_listener()
 
     def _init_brokers(self):
         redis_url = os.environ.get("REDIS_URL")
@@ -51,18 +55,35 @@ class RealtimeBroker:
             except Exception:
                 self._kafka_producer = None
 
-    def set_socketio(self, socketio):
-        self.socketio = socketio
+    def _start_redis_listener(self):
+        """Subscribe to Redis pub/sub for cross-instance event fan-out."""
+        if self._redis_client is None:
+            return
+        try:
+            import threading
+            self._redis_pubsub = self._redis_client.pubsub(ignore_subscribe_messages=True)
+            self._redis_pubsub.subscribe("aml-events")
 
-    def add_subscriber(self, queue):
-        self._subscribers.append(queue)
-        if self.app is not None:
-            app_subscribers = self.app.config.setdefault("STREAM_SUBSCRIBERS", [])
-            if queue not in app_subscribers:
-                app_subscribers.append(queue)
-        return queue
+            def _listen():
+                for raw in self._redis_pubsub.listen():
+                    if raw.get("type") != "message":
+                        continue
+                    try:
+                        message = json.loads(raw["data"])
+                        if message.get("publisher") == self._instance_id:
+                            continue
+                        self._local_deliver(message.get("event"), message.get("data"))
+                    except Exception:
+                        pass
 
-    def publish(self, event_name, payload):
+            thread = threading.Thread(target=_listen, daemon=True)
+            thread.start()
+        except Exception:
+            self._redis_pubsub = None
+
+    def _local_deliver(self, event_name, payload):
+        if not event_name:
+            return
         message = {"event": event_name, "data": payload}
         delivered = set()
         app_subscribers = self.app.config.get("STREAM_SUBSCRIBERS", []) if self.app is not None else []
@@ -75,12 +96,26 @@ class RealtimeBroker:
                 subscriber.put_nowait(message)
             except Exception:
                 pass
-
         if self.socketio is not None:
             try:
                 self.socketio.emit(event_name, payload, broadcast=True)
             except Exception:
                 pass
+
+    def set_socketio(self, socketio):
+        self.socketio = socketio
+
+    def add_subscriber(self, queue):
+        self._subscribers.append(queue)
+        if self.app is not None:
+            app_subscribers = self.app.config.setdefault("STREAM_SUBSCRIBERS", [])
+            if queue not in app_subscribers:
+                app_subscribers.append(queue)
+        return queue
+
+    def publish(self, event_name, payload):
+        message = {"event": event_name, "data": payload, "publisher": self._instance_id}
+        self._local_deliver(event_name, payload)
 
         if self._redis_client is not None:
             try:

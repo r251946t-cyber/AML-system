@@ -3,30 +3,86 @@
 <section class="hero hero-banner">
   <div class="hero-badge">Risk Intelligence</div>
   <h2>ZB Bank AML Reporting</h2>
-  <p>Monitor portfolio risk, investigate flagged activity, and review alert trends for the institution.</p>
+  <p>Monitor portfolio risk, investigate flagged activity, and review regulatory reports for the institution.</p>
 </section>
+
 <section class="card table-card">
   <h3>Executive Summary</h3>
   <ul>
     <li><strong>Total transactions:</strong> {{ total_transactions }}</li>
     <li><strong>Suspicious transactions:</strong> {{ suspicious_transactions }}</li>
   </ul>
-  <h3>High-risk accounts</h3>
+
+  <h3>Monthly transaction volume</h3>
+  {% if monthly_volume %}
   <ul>
-    {% for account in high_risk_accounts %}
-      <li>{{ account.account_number }} - {{ account.count }} alerts</li>
+    {% for row in monthly_volume %}
+      <li>{{ row.month }} — {{ row.count }} transactions, ${{ "%.2f"|format(row.volume or 0) }} volume</li>
     {% endfor %}
   </ul>
+  {% else %}
+  <p>No transaction history yet.</p>
+  {% endif %}
+
+  <h3>High-risk accounts</h3>
+  {% if high_risk_accounts %}
+  <ul>
+    {% for account in high_risk_accounts %}
+      <li>{{ account.account_number }} — {{ account.count }} alerts</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No high-risk accounts identified.</p>
+  {% endif %}
+
   <h3>Risk analysis summary</h3>
   <ul>
     {% for item in risk_summary %}
-      <li>{{ item.risk_level }} - {{ item.count }} transactions</li>
+      <li>{{ item.risk_level }} — {{ item.count }} transactions</li>
     {% endfor %}
   </ul>
+
+  <h3>SAR reports</h3>
+  {% if sar_reports %}
+  <ul>
+    {% for sar in sar_reports %}
+      <li>
+        {{ sar.reference_number or ('SAR #' ~ sar.id) }} — {{ sar.status|upper }} —
+        Account {{ sar.account_number }} — {{ sar.created_at }}
+        {% if sar.status == 'draft' %}
+          <form method="post" action="{{ url_for('submit_sar', sar_id=sar.id) }}" style="display:inline;">
+            <button type="submit" class="btn btn-primary">Submit to FIU</button>
+          </form>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No SAR reports on file.</p>
+  {% endif %}
+
+  <h3>CTR reports</h3>
+  {% if ctr_reports %}
+  <ul>
+    {% for ctr in ctr_reports %}
+      <li>
+        CTR #{{ ctr.id }} — {{ ctr.status|upper }} — Account {{ ctr.account_number }} —
+        ${{ "%.2f"|format(ctr.amount) }} — {{ ctr.created_at }}
+      </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No CTR reports on file.</p>
+  {% endif %}
+
   <h3>Alert history</h3>
   <ul>
     {% for alert in alerts %}
-      <li>Alert #{{ alert.id }} • Tx #{{ alert.transaction_id }} • {{ alert.timestamp }} • {{ alert.account_number }} • {{ alert.risk_level }} • Score {{ alert.risk_score }} • {{ alert.reason }}</li>
+      <li>
+        <a href="{{ url_for('alert_detail', alert_id=alert.id) }}">Alert #{{ alert.id }}</a>
+        — Tx #{{ alert.transaction_id }} — {{ alert.timestamp }} — {{ alert.account_number }}
+        — {{ alert.risk_level }} — Score {{ alert.risk_score }} — {{ alert.status|upper }}
+      </li>
     {% endfor %}
   </ul>
 </section>

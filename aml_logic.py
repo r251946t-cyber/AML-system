@@ -349,6 +349,32 @@ def rule_night_transaction(timestamp_str: str, amount: float) -> RuleResult:
     return RuleResult(rule_id="R10", triggered=False, score_delta=0, reason="")
 
 
+def rule_high_risk_jurisdiction(destination_country: str, amount: float, tx_type: str) -> RuleResult:
+    """R13 — Cross-border transfer to FATF high-risk jurisdiction."""
+    country = (destination_country or "ZW").upper().strip()
+    if tx_type == "transfer" and country in HIGH_RISK_COUNTRIES and amount >= 500:
+        return RuleResult(
+            rule_id="R13",
+            triggered=True,
+            score_delta=45,
+            reason=f"Cross-border transfer of ${amount:,.2f} to high-risk jurisdiction ({country})",
+            severity="critical",
+            typology="High-Risk Jurisdiction",
+            evidence={"destination_country": country, "amount": amount},
+        )
+    if tx_type == "transfer" and country not in ("ZW", "US", "GB", "ZA", "") and amount >= 2000:
+        return RuleResult(
+            rule_id="R13",
+            triggered=True,
+            score_delta=20,
+            reason=f"International transfer of ${amount:,.2f} to {country} — enhanced monitoring",
+            severity="warning",
+            typology="Cross-Border Transfer",
+            evidence={"destination_country": country, "amount": amount},
+        )
+    return RuleResult(rule_id="R13", triggered=False, score_delta=0, reason="")
+
+
 def rule_rapid_balance_drain(conn, account: str, amount: float, tx_type: str) -> RuleResult:
     """R11 — Account balance draining rapidly (exit scam / fraud indicator)."""
     if tx_type not in ("withdraw", "transfer"):
@@ -383,6 +409,7 @@ def analyze_transaction(
     sender: str,
     receiver: str,
     timestamp: str,
+    destination_country: str = "ZW",
 ) -> tuple[int, str, str]:
     """
     Evaluate all AML rules and return (risk_score, risk_level, primary_reason).
@@ -406,6 +433,7 @@ def analyze_transaction(
         rule_sar_threshold(amount, tx_type),
         rule_night_transaction(timestamp, amount),
         rule_rapid_balance_drain(conn, sender, amount, tx_type),
+        rule_high_risk_jurisdiction(destination_country, amount, tx_type),
     ]
 
     # Base score: small amount for any outbound
@@ -457,6 +485,7 @@ def get_triggered_rules(
     sender: str,
     receiver: str,
     timestamp: str,
+    destination_country: str = "ZW",
 ) -> list[RuleResult]:
     """Return full rule results for detailed audit logging."""
     rules = [
@@ -471,5 +500,6 @@ def get_triggered_rules(
         rule_sar_threshold(amount, tx_type),
         rule_night_transaction(timestamp, amount),
         rule_rapid_balance_drain(conn, sender, amount, tx_type),
+        rule_high_risk_jurisdiction(destination_country, amount, tx_type),
     ]
     return [r for r in rules if r.triggered]
