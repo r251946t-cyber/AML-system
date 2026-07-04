@@ -7,10 +7,3 @@ __pycache__/
 __pycache__/
 MYSQL_DEPLOYMENT.md
 RILWAY_DEPLOYMENT.md
-aml.db
-test_aml.db
-flask.out.log
-flask.err.log
-.pytest_cache/
-.venv/
-__pycache__/
