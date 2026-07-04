@@ -117,8 +117,15 @@ class RealtimeBroker:
         message = {"event": event_name, "data": payload, "publisher": self._instance_id}
         self._local_deliver(event_name, payload)
 
+        # Persist events to Redis for recovery (if available)
         if self._redis_client is not None:
             try:
+                # Store last 1000 events for replay on reconnection
+                event_key = f"aml_events:history"
+                self._redis_client.lpush(event_key, json.dumps(message))
+                self._redis_client.ltrim(event_key, 0, 999)
+                self._redis_client.expire(event_key, 3600)  # Keep for 1 hour
+                # Also publish to pub/sub for real-time delivery
                 self._redis_client.publish("aml-events", json.dumps(message))
             except Exception:
                 pass

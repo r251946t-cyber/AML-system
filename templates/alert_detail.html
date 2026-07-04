@@ -6,6 +6,107 @@
   <p>Review triggered rules, AI assessment, and screening results. Document disposition and file SAR if required.</p>
 </section>
 
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+  (function() {
+    let socket = null;
+    let eventSource = null;
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 10;
+    const reconnectDelay = 1000;
+
+    function connectSocketIO() {
+      if (!window.io) return;
+      
+      socket = window.io({
+        transports: ["websocket", "polling"],
+        reconnection: true,
+        reconnectionAttempts: maxReconnectAttempts,
+        reconnectionDelay: reconnectDelay,
+        reconnectionDelayMax: 5000
+      });
+
+      socket.on('connect', function() {
+        console.log('SocketIO connected');
+        reconnectAttempts = 0;
+      });
+
+      socket.on('disconnect', function() {
+        console.log('SocketIO disconnected, attempting to reconnect...');
+      });
+
+      socket.on('connect_error', function(error) {
+        console.error('SocketIO connection error:', error);
+        reconnectAttempts++;
+        if (reconnectAttempts >= maxReconnectAttempts) {
+          console.error('Max reconnection attempts reached, falling back to EventSource');
+          socket.disconnect();
+          connectEventSource();
+        }
+      });
+
+      socket.on('alert_update', function(data) {
+        if (data.id === {{ alert.id }}) {
+          location.reload();
+        }
+      });
+
+      socket.on('sar_report', function(data) {
+        if (data.alert_id === {{ alert.id }}) {
+          location.reload();
+        }
+      });
+    }
+
+    function connectEventSource() {
+      if (!window.EventSource) return;
+      
+      eventSource = new EventSource('/stream');
+      
+      eventSource.addEventListener('alert_update', function(event) {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.id === {{ alert.id }}) {
+            location.reload();
+          }
+        } catch (e) {
+          console.error('Error parsing event data:', e);
+        }
+      });
+
+      eventSource.addEventListener('sar_report', function(event) {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.alert_id === {{ alert.id }}) {
+            location.reload();
+          }
+        } catch (e) {
+          console.error('Error parsing event data:', e);
+        }
+      });
+
+      eventSource.onerror = function(error) {
+        console.error('EventSource error:', error);
+        eventSource.close();
+        setTimeout(connectEventSource, reconnectDelay);
+      };
+    }
+
+    // Try SocketIO first, fall back to EventSource
+    if (window.io) {
+      connectSocketIO();
+    } else {
+      connectEventSource();
+    }
+
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', function() {
+      if (socket) socket.disconnect();
+      if (eventSource) eventSource.close();
+    });
+  })();
+</script>
+
 <section class="card table-card">
   <h3>Alert Summary</h3>
   <ul>

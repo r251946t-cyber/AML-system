@@ -1,77 +1,61 @@
-# Railway Deployment Guide
+# Free Deployment Guide - Railway with MySQL
 
-## Prerequisites
-- Railway account (free tier available at https://railway.app)
-- Git repository with your code
+## Quick Steps (5 minutes)
 
-## Deployment Methods
+### 1. Push Code to GitHub (Already Done)
+Your code is already at: https://github.com/prominancefungurayi7-cyber/AML_System
 
-### Method 1: Web Interface (Recommended - Easier)
+### 2. Create Railway Account
+- Go to https://railway.app
+- Sign up (free $5/month credit)
+- Verify email
 
-#### Step 1: Push to GitHub
-```bash
-cd "c:\Users\PROMINENT\Desktop\AML System"
-git init
-git add .
-git commit -m "Initial commit"
-git branch -M main
-# Create a new repository on GitHub first, then:
-git remote add origin https://github.com/YOUR_USERNAME/aml-system.git
-git push -u origin main
-```
+### 3. Deploy Application
+1. Click "New Project"
+2. Select "Deploy from GitHub repo"
+3. Choose `AML_System` repository
+4. Click "Deploy"
+5. Wait 2-3 minutes for build
 
-#### Step 2: Deploy via Railway Web
-1. Go to https://railway.app and log in
-2. Click "New Project" → "Deploy from GitHub repo"
-3. Select your `aml-system` repository
-4. Railway will automatically detect your Dockerfile
-5. Click "Deploy"
-
-#### Step 3: Configure Environment Variables
-After deployment, in Railway dashboard:
-1. Go to your project → Settings → Variables
-2. Add these variables:
-   - `SECRET_KEY`: Generate a strong random key (use: `python -c "import secrets; print(secrets.token_hex(32))"`)
-   - `FLASK_ENV`: `production`
-   - `DATABASE_URL`: `sqlite:////app/data/aml.db` (or use Railway PostgreSQL addon)
-   - `PORT`: `5000`
-
-#### Step 4: Add PostgreSQL (Recommended for Production)
+### 4. Add MySQL Database
 1. In Railway dashboard, click "New Service"
-2. Select "PostgreSQL"
-3. Railway will provide a connection string
-4. Update `DATABASE_URL` variable with the PostgreSQL connection string
-
-### Method 2: Railway CLI
+2. Select "MySQL"
+3. Wait for MySQL to initialize
+4. Click on MySQL service → "Variables"
+5. Copy the `DATABASE_URL` value
 
 ### 5. Configure Environment Variables
-After deployment, set these environment variables in Railway dashboard:
+1. Go to your app service → Settings → Variables
+2. Add these variables:
+   - `DATABASE_URL`: Paste the MySQL connection string from step 4
+   - `SECRET_KEY`: Generate one with: `python -c "import secrets; print(secrets.token_hex(32))"`
+   - `FLASK_ENV`: `production`
+   - `PORT`: `5000`
 
-**Required:**
-- `SECRET_KEY` - Generate a strong random key
-- `FLASK_ENV` - Set to `production`
-- `DATABASE_URL` - Railway will automatically set this if using their PostgreSQL, or use: `sqlite:////app/data/aml.db`
-- `PORT` - Railway automatically sets this
+### 6. Redeploy
+1. Click "Deploy" button in app service
+2. Wait 2-3 minutes
+3. Click the generated URL (e.g., https://your-app.railway.app)
 
-**Optional (for production):**
-- `REDIS_URL` - If you want Redis caching
-- `KAFKA_BOOTSTRAP_SERVERS` - If you want Kafka integration
-- `SMTP_EMAIL` - For OTP emails
-- `SMTP_PASSWORD` - For SMTP authentication
+## That's It!
 
-### 6. Access Your Application
-After deployment, Railway will provide a public URL like:
-`https://your-app-name.railway.app`
+Your AML System is now live with:
+- Free hosting
+- Free MySQL database
+- Automatic SSL
+- Real-time monitoring
+- Industrial-grade features
 
-## Free Tier Limits
-- $5/month free credit
-- 512MB RAM
-- Shared CPU
-- 1GB storage (ephemeral - data resets on redeploy)
+## Cost
+- **Free**: $5/month credit covers both app and MySQL
+- **After credit**: ~$5-10/month for small usage
 
-**Important:** SQLite database will be ephemeral on Railway. For production, consider:
-1. Using Railway's PostgreSQL addon (free tier available)
-2. Using Railway's volume for persistent storage
+## Alternative: PlanetScale + Railway
+If Railway MySQL isn't available:
+1. Create free PlanetScale account (https://planetscale.com)
+2. Create database
+3. Get connection string
+4. Use it as `DATABASE_URL` in Railway
 
 ## Using Railway PostgreSQL (Recommended for Production)
 

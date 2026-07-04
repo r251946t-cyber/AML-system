@@ -76,6 +76,7 @@ if app.config.get("TESTING"):
 app.config.setdefault("STREAM_SUBSCRIBERS", [])
 app.config.setdefault("LAST_MONITORED_TRANSACTION_ID", 0)
 app.config.setdefault("REALTIME_POLL_INTERVAL", 0.5)
+app.config.setdefault("ACTIVE_STREAMS", {})
 app.config.setdefault(
     "DATABASE",
     app.config.get("DATABASE_URL", os.path.join(os.path.dirname(__file__), "aml.db")),
@@ -91,8 +92,21 @@ if app.config["DATABASE"].startswith("sqlite:///"):
 logging.basicConfig(level=logging.INFO)
 app.logger.setLevel(logging.INFO)
 
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", manage_session=False)
 app.extensions["realtime_broker"] = RealtimeBroker(app=app, socketio=socketio)
+
+# SocketIO authentication middleware
+@socketio.on('connect')
+def handle_connect():
+    if 'user_id' not in session:
+        return False
+    app.logger.info(f"User {session.get('user_id')} connected via SocketIO")
+    return True
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    if 'user_id' in session:
+        app.logger.info(f"User {session.get('user_id')} disconnected from SocketIO")
 
 ID_NUMBER_PATTERN = re.compile(r"^\d{2}-\d{6,7}[A-Z]\d{2}$")
 ID_NUMBER_FORMAT_MESSAGE = "ID number must use the format 00-000000A00, for example 08-995728P34."
@@ -548,6 +562,42 @@ def get_last_insert_id(conn):
 
 def broadcast_event(event_name, payload):
     app.extensions["realtime_broker"].publish(event_name, payload)
+
+
+def update_customer_risk_rating(conn, account_number, action, previous_risk_level):
+    """Update customer risk rating based on alert resolution action."""
+    risk_mapping = {
+        "standard": 0,
+        "low": 1,
+        "medium": 2,
+        "high": 3,
+        "critical": 4
+    }
+    
+    current_risk_score = risk_mapping.get(previous_risk_level or "standard", 0)
+    new_risk_score = current_risk_score
+    
+    if action == "resolve":
+        # Resolution (likely false positive) - decrease risk slightly
+        new_risk_score = max(0, current_risk_score - 1)
+    elif action == "escalate":
+        # Escalation - increase risk
+        new_risk_score = min(4, current_risk_score + 1)
+    elif action == "file_sar":
+        # SAR filed - mark as high risk
+        new_risk_score = 3  # high
+    
+    # Convert score back to rating
+    score_to_risk = {v: k for k, v in risk_mapping.items()}
+    new_risk_rating = score_to_risk.get(new_risk_score, "standard")
+    
+    if new_risk_rating != previous_risk_level:
+        conn.execute(
+            "UPDATE users SET risk_rating=? WHERE account_number=?",
+            (new_risk_rating, account_number)
+        )
+        return new_risk_rating
+    return previous_risk_level
 
 
 def _stats_payload(conn):
@@ -1356,7 +1406,20 @@ def index():
 
 @app.route("/health")
 def health():
-    return {"status": "ok", "service": "stanpro-aml", "timestamp": datetime.now(timezone.utc).isoformat()}, 200
+    broker = app.extensions.get("realtime_broker")
+    status = {
+        "status": "ok",
+        "service": "stanpro-aml",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "realtime": {
+            "subscribers": len(broker._subscribers) if broker else 0,
+            "redis_connected": broker._redis_client is not None if broker else False,
+            "kafka_connected": broker._kafka_producer is not None if broker else False,
+        },
+        "database": app.config.get("DATABASE", "unknown"),
+        "active_streams": len(app.config.get("ACTIVE_STREAMS", {})),
+    }
+    return status, 200
 
 
 @app.route("/dashboard")
@@ -1768,16 +1831,22 @@ def alert_detail(alert_id):
                 "UPDATE alerts SET status='resolved', case_notes=?, resolved_by=?, resolved_at=? WHERE id=?",
                 (notes, officer["username"], datetime.now(timezone.utc).isoformat(), alert_id),
             )
-            record_activity(officer["username"], "resolve_alert", f"Alert #{alert_id} resolved")
-            flash(f"Alert #{alert_id} marked as resolved.")
+            # Update customer risk rating
+            old_risk = account_user.get("risk_rating", "standard") if account_user else "standard"
+            new_risk = update_customer_risk_rating(get_db(), alert["account_number"], "resolve", old_risk)
+            record_activity(officer["username"], "resolve_alert", f"Alert #{alert_id} resolved, risk rating: {old_risk} -> {new_risk}")
+            flash(f"Alert #{alert_id} marked as resolved. Customer risk rating updated to {new_risk}.")
 
         elif action == "escalate":
             get_db().execute(
                 "UPDATE alerts SET status='escalated', case_notes=?, assigned_to=? WHERE id=?",
                 (notes, officer["username"], alert_id),
             )
-            record_activity(officer["username"], "escalate_alert", f"Alert #{alert_id} escalated")
-            flash(f"Alert #{alert_id} escalated.")
+            # Update customer risk rating
+            old_risk = account_user.get("risk_rating", "standard") if account_user else "standard"
+            new_risk = update_customer_risk_rating(get_db(), alert["account_number"], "escalate", old_risk)
+            record_activity(officer["username"], "escalate_alert", f"Alert #{alert_id} escalated, risk rating: {old_risk} -> {new_risk}")
+            flash(f"Alert #{alert_id} escalated. Customer risk rating updated to {new_risk}.")
 
         elif action == "file_sar":
             narrative = request.form.get("sar_narrative", notes)
@@ -1791,8 +1860,11 @@ def alert_detail(alert_id):
                 "UPDATE alerts SET status='sar_filed', case_notes=? WHERE id=?",
                 (f"SAR filed: {ref}. {notes}", alert_id),
             )
-            record_activity(officer["username"], "file_sar", f"SAR {ref} filed for alert #{alert_id}")
-            flash(f"SAR filed successfully. Reference: {ref}")
+            # Update customer risk rating
+            old_risk = account_user.get("risk_rating", "standard") if account_user else "standard"
+            new_risk = update_customer_risk_rating(get_db(), alert["account_number"], "file_sar", old_risk)
+            record_activity(officer["username"], "file_sar", f"SAR {ref} filed for alert #{alert_id}, risk rating: {old_risk} -> {new_risk}")
+            flash(f"SAR filed successfully. Reference: {ref}. Customer risk rating updated to {new_risk}.")
 
         get_db().commit()
         broadcast_alert_update(get_db(), alert_id)
@@ -2118,7 +2190,29 @@ def api_transactions():
 @app.route("/stream")
 @login_required("customer", "compliance", "admin")
 def stream():
-    return app.extensions["realtime_broker"].stream_response()
+    # Rate limiting: check if user has too many active streams
+    user_streams_key = f"stream_user_{session.get('user_id')}"
+    active_streams = app.config.get("ACTIVE_STREAMS", {})
+    
+    if user_streams_key in active_streams:
+        active_streams[user_streams_key] += 1
+        if active_streams[user_streams_key] > 3:  # Max 3 concurrent streams per user
+            app.logger.warning(f"User {session.get('user_id')} exceeded stream limit")
+            return Response("Too many active connections", status=429)
+    else:
+        active_streams[user_streams_key] = 1
+    
+    response = app.extensions["realtime_broker"].stream_response()
+    
+    # Cleanup on response close
+    @response.call_on_close
+    def cleanup():
+        if user_streams_key in active_streams:
+            active_streams[user_streams_key] -= 1
+            if active_streams[user_streams_key] <= 0:
+                del active_streams[user_streams_key]
+    
+    return response
 
 
 # ── Error handlers ──

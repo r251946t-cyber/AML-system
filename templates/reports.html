@@ -6,6 +6,125 @@
   <p>Monitor portfolio risk, investigate flagged activity, and review regulatory reports for the institution.</p>
 </section>
 
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+  (function() {
+    let socket = null;
+    let eventSource = null;
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 10;
+    const reconnectDelay = 1000;
+
+    function connectSocketIO() {
+      if (!window.io) return;
+      
+      socket = window.io({
+        transports: ["websocket", "polling"],
+        reconnection: true,
+        reconnectionAttempts: maxReconnectAttempts,
+        reconnectionDelay: reconnectDelay,
+        reconnectionDelayMax: 5000
+      });
+
+      socket.on('connect', function() {
+        console.log('SocketIO connected');
+        reconnectAttempts = 0;
+      });
+
+      socket.on('disconnect', function() {
+        console.log('SocketIO disconnected, attempting to reconnect...');
+      });
+
+      socket.on('connect_error', function(error) {
+        console.error('SocketIO connection error:', error);
+        reconnectAttempts++;
+        if (reconnectAttempts >= maxReconnectAttempts) {
+          console.error('Max reconnection attempts reached, falling back to EventSource');
+          socket.disconnect();
+          connectEventSource();
+        }
+      });
+
+      socket.on('alert_update', function(data) {
+        location.reload();
+      });
+
+      socket.on('sar_report', function(data) {
+        location.reload();
+      });
+
+      socket.on('ctr_report', function(data) {
+        location.reload();
+      });
+
+      socket.on('stats', function(data) {
+        location.reload();
+      });
+    }
+
+    function connectEventSource() {
+      if (!window.EventSource) return;
+      
+      eventSource = new EventSource('/stream');
+      
+      eventSource.addEventListener('alert_update', function(event) {
+        try {
+          JSON.parse(event.data);
+          location.reload();
+        } catch (e) {
+          console.error('Error parsing event data:', e);
+        }
+      });
+
+      eventSource.addEventListener('sar_report', function(event) {
+        try {
+          JSON.parse(event.data);
+          location.reload();
+        } catch (e) {
+          console.error('Error parsing event data:', e);
+        }
+      });
+
+      eventSource.addEventListener('ctr_report', function(event) {
+        try {
+          JSON.parse(event.data);
+          location.reload();
+        } catch (e) {
+          console.error('Error parsing event data:', e);
+        }
+      });
+
+      eventSource.addEventListener('stats', function(event) {
+        try {
+          JSON.parse(event.data);
+          location.reload();
+        } catch (e) {
+          console.error('Error parsing event data:', e);
+        }
+      });
+
+      eventSource.onerror = function(error) {
+        console.error('EventSource error:', error);
+        eventSource.close();
+        setTimeout(connectEventSource, reconnectDelay);
+      };
+    }
+
+    // Try SocketIO first, fall back to EventSource
+    if (window.io) {
+      connectSocketIO();
+    } else {
+      connectEventSource();
+    }
+
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', function() {
+      if (socket) socket.disconnect();
+      if (eventSource) eventSource.close();
+    });
+  })();
+</script>
+
 <section class="card table-card">
   <h3>Executive Summary</h3>
   <ul>
