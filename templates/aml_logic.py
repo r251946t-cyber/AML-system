@@ -1,5 +1,5 @@
 """
-aml_logic.py — ZB Bank AML Detection Engine
+aml_logic.py — StanPro Bank AML Detection Engine
 ============================================
 Industry-grade rule engine aligned with:
   • FATF Recommendations 10, 20, 23, 29
