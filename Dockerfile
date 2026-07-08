@@ -25,4 +25,4 @@ ENV PYTHONUNBUFFERED=1
 EXPOSE 5000
 
 # Run the application
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--worker-class", "eventlet", "-w", "1", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--worker-class", "eventlet", "-w", "2", "--timeout", "60", "app:app"]
