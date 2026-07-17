@@ -1415,9 +1415,9 @@ def _random_transaction_amount(tx_type):
 
 def _simulation_plan(count):
 
-    normal_count = int(count * 0.80)
+    normal_count = int(count * 0.60)
 
-    suspicious_count = int(count * 0.15)
+    suspicious_count = int(count * 0.30)
 
     super_count = count - normal_count - suspicious_count
 
@@ -2238,7 +2238,7 @@ def _combine_rule_ai_risk(rule_score, rule_level, rule_reason, triggered_rules, 
 
 
 
-            if ai_level == "normal" and ai_confidence >= 0.75 and rule_rank < RISK_RANK["suspicious"]:
+            if ai_level == "normal" and ai_confidence >= 0.85 and rule_rank < RISK_RANK["low"]:
 
                 final_score = min(blended_score, 24)
 
