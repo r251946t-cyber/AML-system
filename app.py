@@ -4573,6 +4573,16 @@ def ensure_ai_model_ready():
 
 
 
+# Initialize database on startup (for gunicorn deployment)
+try:
+    init_db()
+    seed_demo_data()
+    ensure_ai_model_ready()
+    ensure_background_monitor()
+except Exception as e:
+    logging.error(f"Error during startup initialization: {e}")
+
+
 if __name__ == "__main__":
 
     init_db()
