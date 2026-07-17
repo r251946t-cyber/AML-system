@@ -12,3 +12,9 @@ scikit-learn>=1.5
 pandas>=2.2
 numpy>=2.0
 joblib>=1.4
+
+# Advanced AML ML dependencies
+imbalanced-learn>=0.12
+xgboost>=2.0
+lightgbm>=4.0
+shap>=0.44

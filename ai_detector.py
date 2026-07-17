@@ -6,6 +6,16 @@ Hybrid supervised + unsupervised detection aligned with modern bank AML:
   • Isolation Forest for behavioral anomaly detection (unsupervised)
   • Synthetic bootstrap dataset for cold-start training
   • Model versioning, cross-validation metrics, and governance metadata
+  
+NOTE: This module maintains backward compatibility with the existing system.
+For advanced features, use the new aml_system.py module which includes:
+  - XGBoost/LightGBM ensemble models
+  - SMOTE class imbalance handling
+  - 50+ comprehensive features
+  - SHAP explainability
+  - Fraud pattern detection
+  - Model versioning registry
+  - Continuous learning
 """
 
 import json
