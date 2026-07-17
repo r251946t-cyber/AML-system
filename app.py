@@ -4053,19 +4053,19 @@ def generate_transactions():
 
         count = 100
 
+    try:
 
+        users = get_db().execute(
 
-    users = get_db().execute(
+            "SELECT id, username, account_number, balance, wealth_segment FROM users WHERE role='customer' ORDER BY id"
 
-        "SELECT id, username, account_number, balance, wealth_segment FROM users WHERE role='customer' ORDER BY id"
+        ).fetchall()
 
-    ).fetchall()
+        if not users:
 
-    if not users:
+            flash("No customer accounts are available for transaction generation.")
 
-        flash("No customer accounts are available for transaction generation.")
-
-        return redirect(url_for("admin_dashboard"))
+            return redirect(url_for("admin_dashboard"))
 
 
 
@@ -4217,23 +4217,19 @@ def generate_transactions():
 
     )
 
-    if model is None:
-
-        flash("Transactions generated through AML rule engine; AI training needs more labelled data.")
-
-    else:
-
-        meta = get_model_metadata()
-
-        flash(
-
-            f"Generated {count} transactions via full AML pipeline (rules + AI + screening). "
-
-            f"AI model v{meta.get('version', '?')} trained on {meta.get('training_samples', '?')} samples."
-
-        )
+    flash(f"Generated {count} transactions: {generated['normal']} normal, {generated['flagged']} flagged, {generated['critical']} critical.")
 
     return redirect(url_for("admin_dashboard"))
+
+    except Exception as e:
+
+        get_db().rollback()
+
+        app.logger.error(f"Transaction generation failed: {e}")
+
+        flash(f"Transaction generation failed: {str(e)}")
+
+        return redirect(url_for("admin_dashboard"))
 
 
 
