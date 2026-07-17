@@ -4049,7 +4049,7 @@ def generate_transactions():
 
         count = 100
 
-    if count not in (100, 1000, 5000):
+    if count not in (50, 100, 250, 500):
 
         count = 100
 

@@ -370,9 +370,10 @@
           h("form", { method: "post", action: "/admin/generate-transactions" },
             h("label", null, "Number of Transactions"),
             h("select", { name: "count", defaultValue: "100" },
+              h("option", { value: "50" }, "50"),
               h("option", { value: "100" }, "100"),
-              h("option", { value: "1000" }, "1,000"),
-              h("option", { value: "5000" }, "5,000")
+              h("option", { value: "250" }, "250"),
+              h("option", { value: "500" }, "500")
             ),
             h("button", { type: "submit" }, "Generate Transactions")
           )
