@@ -4310,11 +4310,11 @@ def migrate_database():
     conn = get_db()
 
     try:
-        if DB_TYPE == "sqlite":
+        if not is_postgres_database_url(app.config["DATABASE"]) and not is_mysql_database_url(app.config["DATABASE"]):
 
             _migrate_sqlite(conn)
 
-        elif DB_TYPE == "mysql":
+        elif is_mysql_database_url(app.config["DATABASE"]):
 
             _migrate_mysql(conn)
 
