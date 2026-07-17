@@ -280,27 +280,7 @@ def rule_self_transfer(sender: str, receiver: str) -> RuleResult:
 
 def rule_repeat_offender(conn, account: str) -> RuleResult:
     """R08 — Account with recent alert history (elevated risk profile)."""
-    count = _prior_alerts(conn, account, days=30)
-    if count >= 5:
-        return RuleResult(
-            rule_id="R08",
-            triggered=True,
-            score_delta=25,
-            reason=f"Account has {count} alerts in past 30 days — elevated risk profile",
-            severity="critical",
-            typology="Repeat Offender",
-            evidence={"alert_count_30d": count},
-        )
-    if count >= 2:
-        return RuleResult(
-            rule_id="R08",
-            triggered=True,
-            score_delta=12,
-            reason=f"Account has {count} prior alerts in past 30 days",
-            severity="warning",
-            typology="Repeat Offender",
-            evidence={"alert_count_30d": count},
-        )
+    # Disabled to prevent flagging accounts solely based on prior alerts
     return RuleResult(rule_id="R08", triggered=False, score_delta=0, reason="")
 
 

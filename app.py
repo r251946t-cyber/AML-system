@@ -122,6 +122,8 @@ from ai_detector import (
 
 from aml_logic import RuleResult, analyze_transaction, get_triggered_rules
 
+from behavioral_profiler import BehavioralProfiler, CustomerBehavioralProfile, TransactionAnomaly
+
 from config import DevelopmentConfig, ProductionConfig, TestingConfig
 
 from realtime import RealtimeBroker
@@ -141,6 +143,145 @@ app.config.from_object(
     DevelopmentConfig if os.environ.get("FLASK_ENV") == "development" else ProductionConfig
 
 )
+
+# Initialize behavioral profiler
+behavioral_profiler = BehavioralProfiler(min_transactions_for_profile=10)
+
+
+def get_customer_behavioral_profile(conn, account_number: str) -> Optional[CustomerBehavioralProfile]:
+    """Load customer's behavioral profile from database."""
+    row = conn.execute(
+        "SELECT profile_data FROM behavioral_profiles WHERE account_number=?",
+        (account_number,)
+    ).fetchone()
+    
+    if not row or not row["profile_data"]:
+        return None
+    
+    try:
+        profile_data = json.loads(row["profile_data"])
+        return behavioral_profiler.dict_to_profile(profile_data)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def save_customer_behavioral_profile(conn, profile: CustomerBehavioralProfile):
+    """Save customer's behavioral profile to database."""
+    profile_dict = behavioral_profiler.profile_to_dict(profile)
+    profile_json = json.dumps(profile_dict)
+    
+    existing = conn.execute(
+        "SELECT account_number FROM behavioral_profiles WHERE account_number=?",
+        (profile.account_number,)
+    ).fetchone()
+    
+    if existing:
+        conn.execute(
+            "UPDATE behavioral_profiles SET profile_data=?, last_updated=?, total_transactions=? WHERE account_number=?",
+            (profile_json, profile.last_updated, profile.total_transactions, profile.account_number)
+        )
+    else:
+        conn.execute(
+            "INSERT INTO behavioral_profiles (account_number, profile_data, last_updated, total_transactions) VALUES (?, ?, ?, ?)",
+            (profile.account_number, profile_json, profile.last_updated, profile.total_transactions)
+        )
+
+
+def build_or_update_customer_profile(conn, account_number: str) -> Optional[CustomerBehavioralProfile]:
+    """Build or update customer's behavioral profile from transaction history."""
+    # Get customer's transaction history
+    transactions = conn.execute(
+        """
+        SELECT id, amount, transaction_type, sender_account, receiver_account, 
+               channel, timestamp, destination_country
+        FROM transactions
+        WHERE sender_account=? OR receiver_account=?
+        ORDER BY timestamp DESC
+        LIMIT 500
+        """,
+        (account_number, account_number)
+    ).fetchall()
+    
+    if not transactions:
+        return None
+    
+    # Convert to list of dicts
+    tx_list = [dict(tx) for tx in transactions]
+    
+    # Get balance history if available
+    balance_history = conn.execute(
+        """
+        SELECT balance, timestamp FROM (
+            SELECT balance, timestamp FROM transactions
+            WHERE sender_account=? OR receiver_account=?
+            ORDER BY timestamp DESC
+            LIMIT 100
+        ) as recent
+        """,
+        (account_number, account_number)
+    ).fetchall()
+    
+    balance_list = [dict(b) for b in balance_history] if balance_history else None
+    
+    # Extract profile
+    profile = behavioral_profiler.extract_profile_from_history(
+        account_number, tx_list, balance_list
+    )
+    
+    if profile:
+        save_customer_behavioral_profile(conn, profile)
+    
+    return profile
+
+
+def assess_transaction_behavioral_risk(
+    conn,
+    transaction: Dict[str, Any],
+    sender_account: str
+) -> Tuple[float, str, str, List[str]]:
+    """
+    Assess transaction risk using behavioral profiling.
+    
+    Returns:
+        (risk_score, risk_level, reason, anomaly_reasons)
+    """
+    # Get or build customer profile
+    profile = get_customer_behavioral_profile(conn, sender_account)
+    
+    if not profile:
+        # Try to build profile from history
+        profile = build_or_update_customer_profile(conn, sender_account)
+    
+    if not profile:
+        # Insufficient data for behavioral analysis
+        return 0, "normal", "Insufficient transaction history for behavioral analysis", []
+    
+    # Detect anomaly
+    anomaly = behavioral_profiler.detect_anomaly(profile, transaction)
+    
+    # Update profile with this transaction (pass anomaly score for adaptive learning)
+    updated_profile = behavioral_profiler.update_profile(profile, transaction, anomaly.overall_anomaly_score)
+    save_customer_behavioral_profile(conn, updated_profile)
+    
+    # Convert anomaly score to risk score (0-100)
+    risk_score = int(anomaly.overall_anomaly_score)
+    
+    # Map anomaly risk level to standard risk levels
+    risk_level_mapping = {
+        "normal": "normal",
+        "low": "low", 
+        "medium": "suspicious",
+        "high": "high_risk",
+        "critical": "critical"
+    }
+    risk_level = risk_level_mapping.get(anomaly.risk_level, "normal")
+    
+    # Build reason
+    reason = anomaly.behavioral_context
+    if anomaly.anomaly_reasons:
+        reason += " " + "; ".join(anomaly.anomaly_reasons)
+    
+    return risk_score, risk_level, reason, anomaly.anomaly_reasons
 
 if app.config.get("TESTING"):
 
@@ -788,6 +929,8 @@ def _migrate_sqlite(conn):
 
                    "assigned_to TEXT", "case_notes TEXT", "resolved_at TEXT", "resolved_by TEXT"],
 
+        "behavioral_profiles": ["account_number TEXT PRIMARY KEY", "profile_data TEXT", "last_updated TEXT", "total_transactions INTEGER DEFAULT 0"],
+
     }
 
     for table, cols in migrations.items():
@@ -842,6 +985,12 @@ def _migrate_mysql(conn):
             ("case_notes", "LONGTEXT"),
             ("resolved_at", "VARCHAR(255)"),
             ("resolved_by", "VARCHAR(255)"),
+        ],
+        "behavioral_profiles": [
+            ("account_number", "VARCHAR(255) PRIMARY KEY"),
+            ("profile_data", "LONGTEXT"),
+            ("last_updated", "VARCHAR(255)"),
+            ("total_transactions", "INTEGER DEFAULT 0"),
         ],
     }
 
@@ -2458,45 +2607,57 @@ def process_transaction_event(
 
 
 
-    ai_transaction = {
-
+    # Build transaction dict for behavioral analysis
+    transaction_dict = {
+        "id": transaction_id,
         "sender_account": sender_account,
-
         "receiver_account": receiver_account,
-
         "amount": amount,
-
         "transaction_type": transaction_type,
-
         "timestamp": timestamp,
-
+        "destination_country": destination_country,
     }
-
-    ai_transaction.update(
-
-        _ai_profile_for_transaction(
-
-            conn, transaction_id, sender_account, receiver_account, amount, timestamp
-
-        )
-
-    )
-
+    
     tx_row = conn.execute("SELECT channel FROM transactions WHERE id=?", (transaction_id,)).fetchone()
-
     if tx_row and tx_row["channel"]:
-
-        ai_transaction["channel"] = tx_row["channel"]
-
-
-
-    ai_level, ai_confidence, _anomaly = predict_risk_level(ai_transaction)
-
-    risk_score, risk_level, reason, ai_reason = _combine_rule_ai_risk(
-
-        rule_score, rule_level, rule_reason, triggered, ai_level, ai_confidence
-
+        transaction_dict["channel"] = tx_row["channel"]
+    
+    # Primary: Behavioral-based risk assessment
+    behavioral_score, behavioral_level, behavioral_reason, anomaly_reasons = assess_transaction_behavioral_risk(
+        conn, transaction_dict, sender_account
     )
+    
+    # Secondary: Rule-based assessment (for mandatory compliance and fallback)
+    rule_score, rule_level, rule_reason = analyze_transaction(
+        conn, transaction_type, amount, sender_account, receiver_account, timestamp,
+        destination_country=destination_country,
+    )
+    
+    # Combine behavioral and rule-based assessments
+    # Behavioral assessment takes priority unless mandatory compliance rules are triggered
+    mandatory = _is_mandatory_compliance_hit(triggered, rule_reason)
+    
+    if mandatory:
+        # Mandatory compliance rules override behavioral assessment
+        risk_score = rule_score
+        risk_level = rule_level
+        reason = f"Mandatory compliance rule: {rule_reason}. Behavioral context: {behavioral_reason}"
+    elif behavioral_score > 0:
+        # Use behavioral assessment when available
+        risk_score = behavioral_score
+        risk_level = behavioral_level
+        reason = behavioral_reason
+        
+        # Add rule context for high-risk transactions
+        if rule_score >= 40:
+            reason += f" Rule-based context: {rule_reason}"
+            risk_score = max(risk_score, rule_score * 0.3)  # Blend in rule score
+            risk_level = _risk_level_from_score(risk_score)
+    else:
+        # Fallback to rule-based when insufficient behavioral data
+        risk_score = rule_score
+        risk_level = rule_level
+        reason = rule_reason
 
 
 
