@@ -4069,157 +4069,157 @@ def generate_transactions():
 
 
 
-    generated = {"normal": 0, "flagged": 0, "critical": 0}
+        generated = {"normal": 0, "flagged": 0, "critical": 0}
 
-    # Batch insert transactions first for performance
-    transactions_to_process = []
-    for label in _simulation_plan(count):
-
-        (
-
-            sender, recipient, tx_type, amount, timestamp,
-
-            channel, description, _scenario_reason, dest_country,
-
-        ) = _simulation_transaction(label, users)
-
-        sender_account = sender["account_number"]
-
-        receiver_account = recipient["account_number"] if tx_type == "transfer" else sender_account
-
-        get_db().execute(
-
-            """
-
-            INSERT INTO transactions (sender_account, receiver_account, amount, transaction_type,
-
-                currency, channel, timestamp, status, risk_score, risk_level, description,
-
-                destination_country)
-
-            VALUES (?,?,?,?,?,?,?,'Completed',0,'normal',?,?)
-
-            """,
+        # Batch insert transactions first for performance
+        transactions_to_process = []
+        for label in _simulation_plan(count):
 
             (
 
-                sender_account, receiver_account, amount, tx_type, "USD", channel, timestamp,
+                sender, recipient, tx_type, amount, timestamp,
 
-                description, dest_country,
+                channel, description, _scenario_reason, dest_country,
+
+            ) = _simulation_transaction(label, users)
+
+            sender_account = sender["account_number"]
+
+            receiver_account = recipient["account_number"] if tx_type == "transfer" else sender_account
+
+            get_db().execute(
+
+                """
+
+                INSERT INTO transactions (sender_account, receiver_account, amount, transaction_type,
+
+                    currency, channel, timestamp, status, risk_score, risk_level, description,
+
+                    destination_country)
+
+                VALUES (?,?,?,?,?,?,?,'Completed',0,'normal',?,?)
+
+                """,
+
+                (
+
+                    sender_account, receiver_account, amount, tx_type, "USD", channel, timestamp,
+
+                    description, dest_country,
+
+                ),
+
+            )
+
+            transaction_id = get_last_insert_id(get_db())
+
+            transactions_to_process.append((transaction_id, sender, recipient, tx_type, amount, timestamp, sender_account, receiver_account, dest_country))
+
+            # Update balances immediately
+            if tx_type == "deposit":
+
+                get_db().execute("UPDATE users SET balance=balance+? WHERE id=?", (amount, sender["id"]))
+
+            elif tx_type == "withdraw":
+
+                get_db().execute(
+
+                    "UPDATE users SET balance=CASE WHEN balance > ? THEN balance-? ELSE 0 END WHERE id=?",
+
+                    (amount, amount, sender["id"]),
+
+                )
+
+            elif tx_type == "transfer":
+
+                get_db().execute(
+
+                    "UPDATE users SET balance=CASE WHEN balance > ? THEN balance-? ELSE 0 END WHERE id=?",
+
+                    (amount, amount, sender["id"]),
+
+                )
+
+                get_db().execute("UPDATE users SET balance=balance+? WHERE id=?", (amount, recipient["id"]))
+
+        get_db().commit()
+
+        # Process transactions in batch for AML rules and AI
+        for transaction_id, sender, recipient, tx_type, amount, timestamp, sender_account, receiver_account, dest_country in transactions_to_process:
+
+            risk_score, risk_level, reason, alert_id = process_transaction_event(
+
+                get_db(), transaction_id, sender_account, receiver_account,
+
+                amount, tx_type, timestamp, account_number=sender_account,
+
+                destination_country=dest_country,
+
+            )
+
+
+
+            if risk_level in ("normal", "low"):
+
+                generated["normal"] += 1
+
+            elif risk_level in ("critical", "high_risk"):
+
+                generated["critical"] += 1
+
+            else:
+
+                generated["flagged"] += 1
+
+        get_db().commit()
+
+        for user_row in get_db().execute(
+
+            "SELECT account_number FROM users ORDER BY id"
+
+        ).fetchall():
+
+            broadcast_user_balance(get_db(), user_row["account_number"])
+
+        broadcast_event("transaction_batch", {
+
+            "count": count,
+
+            "normal": generated["normal"],
+
+            "flagged": generated["flagged"],
+
+            "critical": generated["critical"],
+
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+
+        })
+
+        broadcast_stats(get_db())
+
+        model = _train_ai_model_from_db(get_db())
+
+        record_activity(
+
+            admin_user["username"],
+
+            "generate_transactions",
+
+            (
+
+                f"Generated {count} rule-scored transactions: "
+
+                f"{generated['normal']} normal, {generated['flagged']} flagged, "
+
+                f"{generated['critical']} critical/high-risk"
 
             ),
 
         )
 
-        transaction_id = get_last_insert_id(get_db())
+        flash(f"Generated {count} transactions: {generated['normal']} normal, {generated['flagged']} flagged, {generated['critical']} critical.")
 
-        transactions_to_process.append((transaction_id, sender, recipient, tx_type, amount, timestamp, sender_account, receiver_account, dest_country))
-
-        # Update balances immediately
-        if tx_type == "deposit":
-
-            get_db().execute("UPDATE users SET balance=balance+? WHERE id=?", (amount, sender["id"]))
-
-        elif tx_type == "withdraw":
-
-            get_db().execute(
-
-                "UPDATE users SET balance=CASE WHEN balance > ? THEN balance-? ELSE 0 END WHERE id=?",
-
-                (amount, amount, sender["id"]),
-
-            )
-
-        elif tx_type == "transfer":
-
-            get_db().execute(
-
-                "UPDATE users SET balance=CASE WHEN balance > ? THEN balance-? ELSE 0 END WHERE id=?",
-
-                (amount, amount, sender["id"]),
-
-            )
-
-            get_db().execute("UPDATE users SET balance=balance+? WHERE id=?", (amount, recipient["id"]))
-
-    get_db().commit()
-
-    # Process transactions in batch for AML rules and AI
-    for transaction_id, sender, recipient, tx_type, amount, timestamp, sender_account, receiver_account, dest_country in transactions_to_process:
-
-        risk_score, risk_level, reason, alert_id = process_transaction_event(
-
-            get_db(), transaction_id, sender_account, receiver_account,
-
-            amount, tx_type, timestamp, account_number=sender_account,
-
-            destination_country=dest_country,
-
-        )
-
-
-
-        if risk_level in ("normal", "low"):
-
-            generated["normal"] += 1
-
-        elif risk_level in ("critical", "high_risk"):
-
-            generated["critical"] += 1
-
-        else:
-
-            generated["flagged"] += 1
-
-    get_db().commit()
-
-    for user_row in get_db().execute(
-
-        "SELECT account_number FROM users ORDER BY id"
-
-    ).fetchall():
-
-        broadcast_user_balance(get_db(), user_row["account_number"])
-
-    broadcast_event("transaction_batch", {
-
-        "count": count,
-
-        "normal": generated["normal"],
-
-        "flagged": generated["flagged"],
-
-        "critical": generated["critical"],
-
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-
-    })
-
-    broadcast_stats(get_db())
-
-    model = _train_ai_model_from_db(get_db())
-
-    record_activity(
-
-        admin_user["username"],
-
-        "generate_transactions",
-
-        (
-
-            f"Generated {count} rule-scored transactions: "
-
-            f"{generated['normal']} normal, {generated['flagged']} flagged, "
-
-            f"{generated['critical']} critical/high-risk"
-
-        ),
-
-    )
-
-    flash(f"Generated {count} transactions: {generated['normal']} normal, {generated['flagged']} flagged, {generated['critical']} critical.")
-
-    return redirect(url_for("admin_dashboard"))
+        return redirect(url_for("admin_dashboard"))
 
     except Exception as e:
 
