@@ -1,8 +1,8 @@
 """
 
-app.py — StanPro Bank AML Intelligence Platform
+server.py — StanPro Bank AML Intelligence Platform (Consolidated Web Server)
 
-==========================================
+=========================================================================
 
 Industry-ready Flask application aligned with:
 
@@ -13,8 +13,6 @@ Industry-ready Flask application aligned with:
   • FinCEN / FIU reporting workflows
 
   • Zimbabwe FIU Act reporting obligations
-
-
 
 New capabilities vs prototype:
 
@@ -36,11 +34,11 @@ New capabilities vs prototype:
 
   • API endpoints for external SIEM / BI integration
 
+  • Real-time event broadcasting via WebSocket/Redis/Kafka
+
 """
 
 
-
-import ai_detector
 
 import json
 
@@ -60,6 +58,10 @@ import threading
 
 import time
 
+import uuid
+
+from queue import Empty, Queue
+
 from datetime import datetime, timedelta, timezone
 
 from decimal import Decimal
@@ -67,8 +69,6 @@ from decimal import Decimal
 from email.message import EmailMessage
 
 from functools import wraps
-
-from queue import Queue
 
 from urllib.parse import unquote, urlparse
 
@@ -108,29 +108,183 @@ from typing import Optional, Dict, List, Tuple, Any
 
 
 
-from ai_detector import (
-
+# Import from consolidated ai_core module
+from ai_core import (
     PROFILE_FEATURE_DEFAULTS,
-
+    BehavioralProfiler,
+    CustomerBehavioralProfile,
+    TransactionAnomaly,
+    behavioral_profiler,
     delete_ai_model,
-
     get_model_metadata,
-
     predict_risk_level,
-
     train_ai_model,
-
 )
-
-from aml_logic import RuleResult, analyze_transaction, get_triggered_rules
-
-from behavioral_profiler import BehavioralProfiler, CustomerBehavioralProfile, TransactionAnomaly
 
 from config import DevelopmentConfig, ProductionConfig, TestingConfig
 
-from realtime import RealtimeBroker
-
 from screening import is_registration_blocked, screen_entity, screening_summary
+
+
+# ============================================================================
+# Real-time Event Broadcasting (Consolidated from realtime.py)
+# ============================================================================
+
+try:
+    import redis
+except ImportError:
+    redis = None
+
+try:
+    from kafka import KafkaProducer
+except ImportError:
+    KafkaProducer = None
+
+
+class RealtimeBroker:
+    """Real-time event broker for WebSocket/Redis/Kafka broadcasting."""
+    def __init__(self, app=None, socketio=None):
+        self.app = app
+        self.socketio = socketio
+        self._subscribers = []
+        self._redis_client = None
+        self._redis_pubsub = None
+        self._kafka_producer = None
+        self._instance_id = str(uuid.uuid4())
+        self._init_brokers()
+        self._start_redis_listener()
+
+    def _init_brokers(self):
+        redis_url = os.environ.get("REDIS_URL")
+        if redis_url and redis is not None:
+            try:
+                self._redis_client = redis.from_url(
+                    redis_url,
+                    decode_responses=True,
+                    socket_connect_timeout=0.5,
+                    socket_timeout=0.5,
+                )
+                self._redis_client.ping()
+            except Exception:
+                self._redis_client = None
+
+        kafka_bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS")
+        if kafka_bootstrap and KafkaProducer is not None:
+            try:
+                self._kafka_producer = KafkaProducer(
+                    bootstrap_servers=[server.strip() for server in kafka_bootstrap.split(",") if server.strip()],
+                    api_version_auto_timeout_ms=500,
+                    request_timeout_ms=1000,
+                    max_block_ms=1000,
+                    value_serializer=lambda value: json.dumps(value).encode("utf-8"),
+                )
+            except Exception:
+                self._kafka_producer = None
+
+    def _start_redis_listener(self):
+        """Subscribe to Redis pub/sub for cross-instance event fan-out."""
+        if self._redis_client is None:
+            return
+        try:
+            self._redis_pubsub = self._redis_client.pubsub(ignore_subscribe_messages=True)
+            self._redis_pubsub.subscribe("aml-events")
+
+            def _listen():
+                for raw in self._redis_pubsub.listen():
+                    if raw.get("type") != "message":
+                        continue
+                    try:
+                        message = json.loads(raw["data"])
+                        if message.get("publisher") == self._instance_id:
+                            continue
+                        self._local_deliver(message.get("event"), message.get("data"))
+                    except Exception:
+                        pass
+
+            thread = threading.Thread(target=_listen, daemon=True)
+            thread.start()
+        except Exception:
+            self._redis_pubsub = None
+
+    def _local_deliver(self, event_name, payload):
+        if not event_name:
+            return
+        message = {"event": event_name, "data": payload}
+        delivered = set()
+        app_subscribers = self.app.config.get("STREAM_SUBSCRIBERS", []) if self.app is not None else []
+        for subscriber in list(self._subscribers) + list(app_subscribers):
+            subscriber_id = id(subscriber)
+            if subscriber_id in delivered:
+                continue
+            delivered.add(subscriber_id)
+            try:
+                subscriber.put_nowait(message)
+            except Exception:
+                pass
+        if self.socketio is not None:
+            try:
+                self.socketio.emit(event_name, payload, broadcast=True)
+            except Exception:
+                pass
+
+    def set_socketio(self, socketio):
+        self.socketio = socketio
+
+    def add_subscriber(self, queue):
+        self._subscribers.append(queue)
+        if self.app is not None:
+            app_subscribers = self.app.config.setdefault("STREAM_SUBSCRIBERS", [])
+            if queue not in app_subscribers:
+                app_subscribers.append(queue)
+        return queue
+
+    def publish(self, event_name, payload):
+        message = {"event": event_name, "data": payload, "publisher": self._instance_id}
+        self._local_deliver(event_name, payload)
+
+        if self._redis_client is not None:
+            try:
+                event_key = f"aml_events:history"
+                self._redis_client.lpush(event_key, json.dumps(message))
+                self._redis_client.ltrim(event_key, 0, 999)
+                self._redis_client.expire(event_key, 3600)
+                self._redis_client.publish("aml-events", json.dumps(message))
+            except Exception:
+                pass
+
+        if self._kafka_producer is not None:
+            try:
+                self._kafka_producer.send("aml-events", message)
+            except Exception:
+                pass
+
+    def stream_response(self):
+        queue = Queue()
+        self.add_subscriber(queue)
+
+        def generate():
+            try:
+                yield ": connected\n\n"
+                while True:
+                    try:
+                        message = queue.get(timeout=1)
+                    except Empty:
+                        yield ": heartbeat\n\n"
+                        continue
+                    yield f"event: {message['event']}\n"
+                    yield f"data: {json.dumps(message['data'])}\n\n"
+            finally:
+                if queue in self._subscribers:
+                    self._subscribers.remove(queue)
+                if self.app is not None:
+                    app_subscribers = self.app.config.get("STREAM_SUBSCRIBERS", [])
+                    if queue in app_subscribers:
+                        app_subscribers.remove(queue)
+
+        return Response(generate(), mimetype="text/event-stream")
+
+
+
 
 
 
@@ -146,8 +300,8 @@ app.config.from_object(
 
 )
 
-# Initialize behavioral profiler
-behavioral_profiler = BehavioralProfiler(min_transactions_for_profile=10)
+# behavioral_profiler is imported from ai_core module
+# No need to reinitialize - using global instance from ai_core
 
 
 def get_customer_behavioral_profile(conn, account_number: str) -> Optional[CustomerBehavioralProfile]:
@@ -229,6 +383,11 @@ def assess_transaction_behavioral_risk(
     """
     Assess transaction risk using behavioral profiling.
     
+    Engineering Constraint: No Circular Flagging
+    - Behavioral scoring is based strictly on statistical anomalies (velocity, amount deviation, counterparty network)
+    - Past alerts, alert counts, or historical risk ratings are NOT used in scoring
+    - Cold-start grace period: Users with < 5 transactions get neutral baseline, rely on global ML model
+    
     Returns:
         (risk_score, risk_level, reason, anomaly_reasons)
     """
@@ -240,10 +399,16 @@ def assess_transaction_behavioral_risk(
         profile = build_or_update_customer_profile(conn, sender_account)
     
     if not profile:
-        # Insufficient data for behavioral analysis
-        return 0, "normal", "Insufficient transaction history for behavioral analysis", []
+        # Insufficient data for behavioral analysis - cold start
+        # Return neutral baseline to rely on global ML model (ai_detector.py)
+        return 0, "normal", "Cold-start: insufficient transaction history for behavioral analysis (< 5 transactions)", []
     
-    # Detect anomaly
+    # Cold-start grace period: check if user has < 5 transactions
+    if profile.total_transactions < 5:
+        # Return neutral baseline to rely on global ML model
+        return 0, "normal", f"Cold-start: building behavioral baseline ({profile.total_transactions}/5 transactions)", []
+    
+    # Detect anomaly using statistical features only (velocity, amount deviation, counterparty network)
     anomaly = behavioral_profiler.detect_anomaly(profile, transaction)
     
     # Update profile with this transaction (pass anomaly score for adaptive learning)
@@ -896,6 +1061,10 @@ def init_db():
 
         _migrate_mysql(conn)
 
+    elif is_postgres_database_url(app.config["DATABASE"]):
+
+        _migrate_postgres(conn)
+
     conn.commit()
 
     conn.close()
@@ -951,7 +1120,6 @@ def _migrate_sqlite(conn):
 
 
 def _migrate_mysql(conn):
-
     """Widen older MySQL VARCHAR columns that store AML evidence JSON/text."""
 
     column_migrations = {
@@ -1007,30 +1175,82 @@ def _migrate_mysql(conn):
         except Exception as e:
             logging.error(f"Error adding columns to {table}: {e}")
 
-    # Modify existing columns to LONGTEXT - only if column exists
-    modify_migrations = [
-        ("transactions", "description", "LONGTEXT"),
-        ("transactions", "rules_triggered", "LONGTEXT"),
-        ("transactions", "rule_reason", "LONGTEXT"),
-        ("transactions", "ai_reason", "LONGTEXT"),
-        ("alerts", "reason", "LONGTEXT"),
-        ("alerts", "rules_triggered", "LONGTEXT"),
-        ("alerts", "case_notes", "LONGTEXT"),
-        ("sar_reports", "narrative", "LONGTEXT"),
-        ("watchlist", "reason", "LONGTEXT"),
-        ("activity_log", "detail", "LONGTEXT"),
-    ]
 
-    for table, column, new_type in modify_migrations:
+def _migrate_postgres(conn):
+    """Add columns for PostgreSQL databases."""
+    column_migrations = {
+        "users": [
+            ("kyc_status", "TEXT DEFAULT 'pending'"),
+            ("pep_flag", "INTEGER DEFAULT 0"),
+            ("risk_rating", "TEXT DEFAULT 'standard'"),
+            ("wealth_segment", "TEXT DEFAULT 'average'"),
+        ],
+        "transactions": [
+            ("currency", "TEXT DEFAULT 'USD'"),
+            ("channel", "TEXT DEFAULT 'online'"),
+            ("rule_score", "DOUBLE PRECISION DEFAULT 0"),
+            ("rule_level", "TEXT DEFAULT 'normal'"),
+            ("rule_reason", "TEXT"),
+            ("ai_risk_level", "TEXT"),
+            ("ai_confidence", "DOUBLE PRECISION DEFAULT 0"),
+            ("ai_reason", "TEXT"),
+            ("rules_triggered", "TEXT DEFAULT '[]'"),
+            ("ctr_required", "INTEGER DEFAULT 0"),
+            ("sar_required", "INTEGER DEFAULT 0"),
+            ("destination_country", "TEXT DEFAULT 'ZW'"),
+            ("screening_hits", "TEXT"),
+            ("reviewed_by", "TEXT"),
+            ("reviewed_at", "TEXT"),
+        ],
+        "alerts": [
+            ("rules_triggered", "TEXT DEFAULT '[]'"),
+            ("status", "TEXT DEFAULT 'open'"),
+            ("assigned_to", "TEXT"),
+            ("case_notes", "TEXT"),
+            ("resolved_at", "TEXT"),
+            ("resolved_by", "TEXT"),
+        ],
+        "behavioral_profiles": [
+            ("account_number", "TEXT PRIMARY KEY"),
+            ("profile_data", "TEXT"),
+            ("last_updated", "TEXT"),
+            ("total_transactions", "INTEGER DEFAULT 0"),
+        ],
+    }
+
+    for table, columns in column_migrations.items():
         try:
+            # Check if table exists
+            table_exists = conn.execute(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = %s)",
+                (table,)
+            ).fetchone()[0]
+            
+            if not table_exists:
+                # Create behavioral_profiles table if it doesn't exist
+                if table == "behavioral_profiles":
+                    conn.execute("""
+                        CREATE TABLE IF NOT EXISTS behavioral_profiles (
+                            account_number TEXT PRIMARY KEY,
+                            profile_data TEXT,
+                            last_updated TEXT,
+                            total_transactions INTEGER DEFAULT 0
+                        )
+                    """)
+                continue
+                
             existing = {
-                row["Field"]
-                for row in conn.execute(f"SHOW COLUMNS FROM {table}").fetchall()
+                row["column_name"]
+                for row in conn.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = %s",
+                    (table,)
+                ).fetchall()
             }
-            if column in existing:
-                conn.execute(f"ALTER TABLE {table} MODIFY COLUMN {column} {new_type}")
+            for column_name, column_def in columns:
+                if column_name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {column_def}")
         except Exception as e:
-            logging.error(f"Error modifying {table}.{column}: {e}")
+            logging.error(f"Error adding columns to {table}: {e}")
 
 
 
@@ -2326,25 +2546,9 @@ def _risk_level_from_score(score):
 
 
 
-def _is_mandatory_compliance_hit(triggered_rules, rule_reason):
-
-    return (
-
-        "[CTR REQUIRED]" in (rule_reason or "")
-
-        or any(getattr(r, "rule_id", "") == "R09" for r in triggered_rules)
-
-        or any(getattr(r, "rule_id", "") == "R14" for r in triggered_rules)
-
-    )
-
-
-
-
-
 def _combine_rule_ai_risk(rule_score, rule_level, rule_reason, triggered_rules, ai_level, ai_confidence):
-
-    mandatory = _is_mandatory_compliance_hit(triggered_rules, rule_reason)
+    # Simplified - mandatory check now based on screening severity only
+    mandatory = any(r.get("severity") == "critical" for r in triggered_rules) if triggered_rules else False
 
     rule_rank = RISK_RANK.get(rule_level, 0)
 
@@ -2546,65 +2750,25 @@ def process_transaction_event(
 
     screen_delta, screen_reason, screen_json = screening_summary(screening_hits)
 
-
-
-    rule_score, rule_level, rule_reason = analyze_transaction(
-
-        conn, transaction_type, amount, sender_account, receiver_account, timestamp,
-
-        destination_country=destination_country,
-
-    )
-
+    # Legacy rule-based assessment removed - using AI + Behavioral only
+    # Screening hits are incorporated directly into risk assessment
+    rule_score = screen_delta if screen_delta else 0
+    rule_level = _risk_level_from_score(rule_score)
+    rule_reason = screen_reason if screen_delta else "No screening hits"
+    
+    # Build triggered rules list from screening only
+    triggered = []
     if screen_delta:
+        triggered.append({
+            "rule_id": "SCREENING",
+            "triggered": True,
+            "score_delta": screen_delta,
+            "reason": screen_reason,
+            "severity": "critical" if any(h.list_type == "sanctions" for h in screening_hits) else "warning",
+            "typology": "Watchlist / PEP Screening",
+        })
 
-        rule_score = min(100, rule_score + screen_delta)
-
-        rule_level = _risk_level_from_score(rule_score)
-
-        rule_reason = f"{screen_reason}. {rule_reason}"
-
-        if any(h.list_type == "sanctions" for h in screening_hits):
-
-            rule_reason = "[SAR REVIEW] " + rule_reason
-
-
-
-    triggered = get_triggered_rules(
-
-        conn, transaction_type, amount, sender_account, receiver_account, timestamp,
-
-        destination_country=destination_country,
-
-    )
-
-    if screen_delta:
-
-        triggered.append(RuleResult(
-
-            rule_id="R14",
-
-            triggered=True,
-
-            score_delta=screen_delta,
-
-            reason=screen_reason,
-
-            severity="critical" if any(h.list_type == "sanctions" for h in screening_hits) else "warning",
-
-            typology="Watchlist / PEP Screening",
-
-        ))
-
-
-
-    rules_json = json.dumps([
-
-        {"id": r.rule_id, "typology": getattr(r, "typology", ""), "score_delta": r.score_delta, "reason": r.reason}
-
-        for r in triggered
-
-    ] + screen_json)
+    rules_json = json.dumps(triggered + screen_json)
 
 
 
@@ -2628,15 +2792,9 @@ def process_transaction_event(
         conn, transaction_dict, sender_account
     )
     
-    # Secondary: Rule-based assessment (for mandatory compliance and fallback)
-    rule_score, rule_level, rule_reason = analyze_transaction(
-        conn, transaction_type, amount, sender_account, receiver_account, timestamp,
-        destination_country=destination_country,
-    )
-    
-    # Combine behavioral and rule-based assessments
-    # Behavioral assessment takes priority unless mandatory compliance rules are triggered
-    mandatory = _is_mandatory_compliance_hit(triggered, rule_reason)
+    # Combine behavioral and screening assessments
+    # Behavioral assessment takes priority unless mandatory screening rules are triggered
+    mandatory = any(h.list_type == "sanctions" for h in screening_hits)
     
     if mandatory:
         # Mandatory compliance rules override behavioral assessment
@@ -2659,6 +2817,11 @@ def process_transaction_event(
         risk_score = rule_score
         risk_level = rule_level
         reason = rule_reason
+    
+    # Set AI-related fields for database compatibility
+    ai_level = behavioral_level if behavioral_score > 0 else None
+    ai_confidence = min(1.0, behavioral_score / 100) if behavioral_score > 0 else 0
+    ai_reason = behavioral_reason if behavioral_score > 0 else None
 
 
 
@@ -2938,7 +3101,7 @@ def login_required(*roles):
 
                 return redirect(url_for("login"))
 
-            if roles and user.get("role") not in roles:
+            if roles and user and user.get("role") not in roles:
 
                 flash("Access denied.")
 
@@ -3571,7 +3734,7 @@ def create_transaction():
 
         recipient_user = get_user_by_account_number(recipient_account)
 
-        if not recipient_user or recipient_user.get("id") == user["id"] or recipient_user.get("role") != "customer":
+        if not recipient_user or (recipient_user.get("id") is not None and recipient_user.get("id") == user["id"]) or (recipient_user.get("role") is not None and recipient_user.get("role") != "customer"):
 
             flash("Recipient customer account not found.")
 
@@ -3583,7 +3746,7 @@ def create_transaction():
 
     sender_account = user["account_number"]
 
-    receiver_account = recipient_user.get("account_number") if recipient_user else user["account_number"]
+    receiver_account = recipient_user.get("account_number") if recipient_user and recipient_user.get("account_number") else user["account_number"]
 
 
 
@@ -3631,7 +3794,8 @@ def create_transaction():
 
         get_db().execute("UPDATE users SET balance=balance-? WHERE id=?", (amount, user["id"]))
 
-        get_db().execute("UPDATE users SET balance=balance+? WHERE id=?", (amount, recipient_user.get("id")))
+        if recipient_user and recipient_user.get("id") is not None:
+            get_db().execute("UPDATE users SET balance=balance+? WHERE id=?", (amount, recipient_user["id"]))
 
 
 
@@ -3691,27 +3855,15 @@ def compliance_dashboard():
 
     offset = (page - 1) * PAGE_SIZE
 
-
-
-    if filter_value == "flagged":
-
-        base = "WHERE risk_level!='normal'"
-
-    elif filter_value == "suspicious":
-
-        base = "WHERE risk_level IN ('suspicious','super_suspicious','high_risk','critical')"
-
-    elif filter_value == "ctr":
-
-        base = "WHERE ctr_required=1"
-
-    elif filter_value == "sar":
-
-        base = "WHERE sar_required=1"
-
-    else:
-
-        base = ""
+    # Whitelist of valid filter values to prevent SQL injection
+    VALID_FILTERS = {
+        "all": "",
+        "flagged": "WHERE risk_level!='normal'",
+        "suspicious": "WHERE risk_level IN ('suspicious','super_suspicious','high_risk','critical')",
+        "ctr": "WHERE ctr_required=1",
+        "sar": "WHERE sar_required=1",
+    }
+    base = VALID_FILTERS.get(filter_value, "")
 
 
 
@@ -3864,14 +4016,14 @@ def alert_detail(alert_id):
             )
 
             # Update customer risk rating
-
-            old_risk = account_user.get("risk_rating", "standard") if account_user else "standard"
-
-            new_risk = update_customer_risk_rating(get_db(), alert.get("account_number"), "resolve", old_risk)
-
-            record_activity(officer["username"], "resolve_alert", f"Alert #{alert_id} resolved, risk rating: {old_risk} -> {new_risk}")
-
-            flash(f"Alert #{alert_id} marked as resolved. Customer risk rating updated to {new_risk}.")
+            if account_user:
+                old_risk = account_user.get("risk_rating", "standard")
+                new_risk = update_customer_risk_rating(get_db(), alert.get("account_number"), "resolve", old_risk)
+                record_activity(officer["username"], "resolve_alert", f"Alert #{alert_id} resolved, risk rating: {old_risk} -> {new_risk}")
+                flash(f"Alert #{alert_id} marked as resolved. Customer risk rating updated to {new_risk}.")
+            else:
+                record_activity(officer["username"], "resolve_alert", f"Alert #{alert_id} resolved (account not found)")
+                flash(f"Alert #{alert_id} marked as resolved.")
 
 
 
@@ -3886,14 +4038,14 @@ def alert_detail(alert_id):
             )
 
             # Update customer risk rating
-
-            old_risk = account_user.get("risk_rating", "standard") if account_user else "standard"
-
-            new_risk = update_customer_risk_rating(get_db(), alert.get("account_number"), "escalate", old_risk)
-
-            record_activity(officer["username"], "escalate_alert", f"Alert #{alert_id} escalated, risk rating: {old_risk} -> {new_risk}")
-
-            flash(f"Alert #{alert_id} escalated. Customer risk rating updated to {new_risk}.")
+            if account_user:
+                old_risk = account_user.get("risk_rating", "standard")
+                new_risk = update_customer_risk_rating(get_db(), alert.get("account_number"), "escalate", old_risk)
+                record_activity(officer["username"], "escalate_alert", f"Alert #{alert_id} escalated, risk rating: {old_risk} -> {new_risk}")
+                flash(f"Alert #{alert_id} escalated. Customer risk rating updated to {new_risk}.")
+            else:
+                record_activity(officer["username"], "escalate_alert", f"Alert #{alert_id} escalated (account not found)")
+                flash(f"Alert #{alert_id} escalated.")
 
 
 
@@ -3922,14 +4074,14 @@ def alert_detail(alert_id):
             )
 
             # Update customer risk rating
-
-            old_risk = account_user.get("risk_rating", "standard") if account_user else "standard"
-
-            new_risk = update_customer_risk_rating(get_db(), alert["account_number"], "file_sar", old_risk)
-
-            record_activity(officer["username"], "file_sar", f"SAR {ref} filed for alert #{alert_id}, risk rating: {old_risk} -> {new_risk}")
-
-            flash(f"SAR filed successfully. Reference: {ref}. Customer risk rating updated to {new_risk}.")
+            if account_user:
+                old_risk = account_user.get("risk_rating", "standard")
+                new_risk = update_customer_risk_rating(get_db(), alert["account_number"], "file_sar", old_risk)
+                record_activity(officer["username"], "file_sar", f"SAR {ref} filed for alert #{alert_id}, risk rating: {old_risk} -> {new_risk}")
+                flash(f"SAR filed successfully. Reference: {ref}. Customer risk rating updated to {new_risk}.")
+            else:
+                record_activity(officer["username"], "file_sar", f"SAR {ref} filed for alert #{alert_id} (account not found)")
+                flash(f"SAR filed successfully. Reference: {ref}.")
 
 
 

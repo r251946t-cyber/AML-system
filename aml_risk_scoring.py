@@ -35,9 +35,9 @@ class RiskScoringSystem:
         """Initialize the risk scoring system."""
         self.risk_thresholds = {
             "low": 25,
-            "medium": 50,
-            "high": 75,
-            "critical": 90
+            "medium": 25,
+            "high": 50,
+            "critical": 75
         }
     
     def calculate_comprehensive_risk(

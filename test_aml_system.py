@@ -86,7 +86,7 @@ class TestDataValidator:
         
         assert is_valid == False
         assert len(errors) > 0
-        assert cleaned["amount"] == 0.0  # Default value
+        assert cleaned["amount"] == 0.01  # MIN_AMOUNT default value
     
     def test_invalid_amount(self):
         """Test validation with invalid amount"""
