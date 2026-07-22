@@ -99,8 +99,28 @@
   function useRealtime(handlers) {
     useEffect(() => {
       if (window.io) {
-        const socket = window.io({ transports: ["websocket", "polling"] });
+        const socket = window.io({ 
+          transports: ["websocket", "polling"],
+          reconnection: true,
+          reconnectionAttempts: 5,
+          reconnectionDelay: 1000,
+          reconnectionDelayMax: 5000
+        });
+        
         Object.keys(handlers).forEach((eventName) => socket.on(eventName, handlers[eventName]));
+        
+        socket.on('connect', () => {
+          console.log('SocketIO connected');
+        });
+        
+        socket.on('disconnect', () => {
+          console.log('SocketIO disconnected');
+        });
+        
+        socket.on('connect_error', (error) => {
+          console.error('SocketIO connection error:', error);
+        });
+        
         return () => socket.disconnect();
       }
 
@@ -112,6 +132,11 @@
             handlers[eventName](payload);
           });
         });
+        
+        source.addEventListener('error', (error) => {
+          console.error('EventSource error:', error);
+        });
+        
         return () => source.close();
       }
 
@@ -132,6 +157,7 @@
     const [stats, setStats] = useState(initialData.stats || {});
     const [feed, setFeed] = useState([]);
     const [status, setStatus] = useState("Connected | live monitoring active");
+    const [activeSection, setActiveSection] = useState("overview");
 
     const addFeed = (text) => setFeed((current) => trim([{ text, timestamp: new Date().toLocaleTimeString() }, ...current], 25));
     const adjustBalanceFromTransaction = (txn) => {
@@ -204,43 +230,73 @@
       { label: "Open alerts", value: stats.open_alerts || alerts.filter((alert) => alert.status === "open").length, caption: "live cases" },
     ];
 
-    return h(window.React.Fragment, null,
-      h(StatGrid, { items: metricItems }),
-      h("section", { className: "grid" },
-        h("div", { className: "card account-card" },
-          h("p", { className: "status-pill" }, "Primary Account"),
-          h("h3", null, accountNumber),
-          h("p", { className: "metric" }, money(balance)),
-          h("p", { className: "muted-line" }, "Available balance updates automatically after every live transaction.")
-        ),
-        h("div", { className: "card action-card" },
-          h(PanelHeading, { title: "Initiate Transaction" }),
-          h("form", { method: "post", action: "/customer/transaction" },
-            h("label", null, "Type"),
-            h("select", { name: "type", defaultValue: "deposit" },
-              h("option", { value: "deposit" }, "Deposit"),
-              h("option", { value: "withdraw" }, "Withdrawal"),
-            h("option", { value: "transfer" }, "Transfer")
-            ),
-            h("label", null, "Amount"),
-            h("input", { type: "number", step: "0.01", name: "amount", required: true }),
-            h("label", null, "Recipient Account Number"),
-            h("input", { name: "recipient", placeholder: "ACC1004" }),
-            h("p", { className: "form-hint" }, "Recipient is required for transfers only."),
-            h("button", { type: "submit" }, "Process Transaction")
-          )
+    const sidebarItems = [
+      { id: "overview", label: "Overview" },
+      { id: "transactions", label: "Transactions" },
+      { id: "alerts", label: "Alerts" },
+      { id: "activity", label: "Activity Feed" },
+    ];
+
+    const renderSection = () => {
+      switch (activeSection) {
+        case "overview":
+          return h(window.React.Fragment, null,
+            h(StatGrid, { items: metricItems }),
+            h("section", { className: "grid" },
+              h("div", { className: "card account-card" },
+                h("p", { className: "status-pill" }, "Primary Account"),
+                h("h3", null, accountNumber),
+                h("p", { className: "metric" }, money(balance)),
+                h("p", { className: "muted-line" }, "Available balance updates automatically after every live transaction.")
+              ),
+              h("div", { className: "card action-card" },
+                h(PanelHeading, { title: "Initiate Transaction" }),
+                h("form", { method: "post", action: "/customer/transaction" },
+                  h("label", null, "Type"),
+                  h("select", { name: "type", defaultValue: "deposit" },
+                    h("option", { value: "deposit" }, "Deposit"),
+                    h("option", { value: "withdraw" }, "Withdrawal"),
+                    h("option", { value: "transfer" }, "Transfer")
+                  ),
+                  h("label", null, "Amount"),
+                  h("input", { type: "number", step: "0.01", name: "amount", required: true }),
+                  h("label", null, "Recipient Account Number"),
+                  h("input", { name: "recipient", placeholder: "ACC1004" }),
+                  h("p", { className: "form-hint" }, "Recipient is required for transfers only."),
+                  h("button", { type: "submit" }, "Process Transaction")
+                )
+              )
+            )
+          );
+        case "transactions":
+          return h(CustomerTransactionsPanel, { transactions });
+        case "alerts":
+          return h(CustomerAlertsPanel, { alerts });
+        case "activity":
+          return h("section", { className: "card table-card live-feed-card" },
+            h(PanelHeading, { title: "Live AML Feed", meta: h(LiveStatus, null, status) }),
+            feed.length ? h("ul", null, feed.map((event, index) => (
+              h("li", { key: `${event.timestamp}-${index}` }, `${event.timestamp} - ${event.text}`)
+            ))) : h(EmptyState, null, "Waiting for live events.")
+          );
+        default:
+          return null;
+      }
+    };
+
+    return h("div", { className: "admin-layout" },
+      h("aside", { className: "admin-sidebar" },
+        h("h3", null, "Customer Portal"),
+        h("nav", null,
+          sidebarItems.map((item) => h("button", {
+            key: item.id,
+            className: activeSection === item.id ? "sidebar-item active" : "sidebar-item",
+            onClick: () => setActiveSection(item.id),
+            type: "button"
+          }, item.label))
         )
       ),
-      h("section", { className: "react-dashboard-grid" },
-        h(CustomerTransactionsPanel, { transactions }),
-        h(CustomerAlertsPanel, { alerts })
-      ),
-      h("section", { className: "card table-card live-feed-card" },
-        h(PanelHeading, { title: "Live AML Feed", meta: h(LiveStatus, null, status) }),
-        feed.length ? h("ul", null, feed.map((event, index) => (
-          h("li", { key: `${event.timestamp}-${index}` }, `${event.timestamp} - ${event.text}`)
-        ))) : h(EmptyState, null, "Waiting for live events.")
-      )
+      h("main", { className: "admin-content" }, renderSection())
     );
   }
 
@@ -573,6 +629,7 @@
     const [stats, setStats] = useState(initialData.stats || {});
     const [feed, setFeed] = useState([]);
     const [status, setStatus] = useState("Connected | live alert monitoring active");
+    const [activeSection, setActiveSection] = useState("overview");
     const filterValue = initialData.filter_value || "all";
 
     const addFeed = (text) => setFeed((current) => trim([{ text, timestamp: new Date().toLocaleTimeString() }, ...current], 30));
@@ -628,18 +685,49 @@
       { label: "Pending CTRs", value: stats.pending_ctrs || 0, caption: "currency reports" },
     ];
 
-    return h(window.React.Fragment, null,
-      h(StatGrid, { items: metricItems }),
-      h(AlertsPanel, { alerts }),
-      h("section", { className: "card table-card" },
-        h(PanelHeading, { title: "Live Compliance Feed", meta: h(LiveStatus, null, status) }),
-        feed.length ? h("ul", null, feed.map((event, index) => (
-          h("li", { className: "activity-item", key: `${event.timestamp}-${index}` },
-            h("strong", null, event.timestamp),
-            h("p", null, event.text)
-          )
-        ))) : h(EmptyState, null, "Waiting for live events.")
-      )
+    const sidebarItems = [
+      { id: "overview", label: "Overview" },
+      { id: "alerts", label: "Alerts" },
+      { id: "activity", label: "Activity Feed" },
+    ];
+
+    const renderSection = () => {
+      switch (activeSection) {
+        case "overview":
+          return h(window.React.Fragment, null,
+            h(StatGrid, { items: metricItems }),
+            h(AlertsPanel, { alerts })
+          );
+        case "alerts":
+          return h(AlertsPanel, { alerts });
+        case "activity":
+          return h("section", { className: "card table-card" },
+            h(PanelHeading, { title: "Live Compliance Feed", meta: h(LiveStatus, null, status) }),
+            feed.length ? h("ul", null, feed.map((event, index) => (
+              h("li", { className: "activity-item", key: `${event.timestamp}-${index}` },
+                h("strong", null, event.timestamp),
+                h("p", null, event.text)
+              )
+            ))) : h(EmptyState, null, "Waiting for live events.")
+          );
+        default:
+          return null;
+      }
+    };
+
+    return h("div", { className: "admin-layout" },
+      h("aside", { className: "admin-sidebar" },
+        h("h3", null, "Compliance Panel"),
+        h("nav", null,
+          sidebarItems.map((item) => h("button", {
+            key: item.id,
+            className: activeSection === item.id ? "sidebar-item active" : "sidebar-item",
+            onClick: () => setActiveSection(item.id),
+            type: "button"
+          }, item.label))
+        )
+      ),
+      h("main", { className: "admin-content" }, renderSection())
     );
   }
 

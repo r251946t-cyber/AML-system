@@ -226,8 +226,11 @@ class RealtimeBroker:
         if self.socketio is not None:
             try:
                 self.socketio.emit(event_name, payload, broadcast=True)
-            except Exception:
-                pass
+                if self.app:
+                    self.app.logger.debug(f"SocketIO broadcast event: {event_name}")
+            except Exception as e:
+                if self.app:
+                    self.app.logger.error(f"SocketIO broadcast failed for {event_name}: {e}")
 
     def set_socketio(self, socketio):
         self.socketio = socketio
@@ -251,8 +254,11 @@ class RealtimeBroker:
                 self._redis_client.ltrim(event_key, 0, 999)
                 self._redis_client.expire(event_key, 3600)
                 self._redis_client.publish("aml-events", json.dumps(message))
-            except Exception:
-                pass
+                if self.app:
+                    self.app.logger.debug(f"Published event to Redis: {event_name}")
+            except Exception as e:
+                if self.app:
+                    self.app.logger.error(f"Failed to publish event to Redis: {e}")
 
         if self._kafka_producer is not None:
             try:
@@ -486,14 +492,18 @@ redis_url = os.environ.get("REDIS_URL")
 socketio_kwargs = {
     "cors_allowed_origins": "*",
     "manage_session": False,
+    "async_mode": "threading",
 }
 
 if redis_url and redis is not None:
     try:
         socketio_kwargs["message_queue"] = redis_url
         socketio_kwargs["channel"] = "aml-socketio"
-    except Exception:
-        pass
+        app.logger.info(f"SocketIO configured with Redis message queue: {redis_url}")
+    except Exception as e:
+        app.logger.warning(f"Failed to configure Redis message queue: {e}")
+else:
+    app.logger.warning("REDIS_URL not configured, SocketIO will work in single-instance mode")
 
 socketio = SocketIO(app, **socketio_kwargs)
 
@@ -504,26 +514,28 @@ app.extensions["realtime_broker"] = RealtimeBroker(app=app, socketio=socketio)
 # SocketIO authentication middleware
 
 @socketio.on('connect')
-
 def handle_connect():
-
     if 'user_id' not in session:
-
+        app.logger.warning("SocketIO connection rejected: no user_id in session")
         return False
-
-    app.logger.info(f"User {session.get('user_id')} connected via SocketIO")
-
+    
+    user_id = session.get('user_id')
+    role = session.get('role', 'unknown')
+    app.logger.info(f"User {user_id} (role: {role}) connected via SocketIO")
+    
+    # Send initial connection confirmation
+    socketio.emit('connect', {'status': 'connected', 'user_id': user_id}, to=request.sid)
+    
     return True
 
 
 
 @socketio.on('disconnect')
-
 def handle_disconnect():
-
     if 'user_id' in session:
-
-        app.logger.info(f"User {session.get('user_id')} disconnected from SocketIO")
+        user_id = session.get('user_id')
+        role = session.get('role', 'unknown')
+        app.logger.info(f"User {user_id} (role: {role}) disconnected from SocketIO")
 
 
 
