@@ -592,9 +592,7 @@
 
     return h(window.React.Fragment, null,
       h(StatGrid, { items: metricItems }),
-      h("section", { className: "react-dashboard-grid compliance-dashboard-grid" },
-        h(AlertsPanel, { alerts })
-      ),
+      h(AlertsPanel, { alerts }),
       h("section", { className: "card table-card" },
         h(PanelHeading, { title: "Live Compliance Feed", meta: h(LiveStatus, null, status) }),
         feed.length ? h("ul", null, feed.map((event, index) => (
