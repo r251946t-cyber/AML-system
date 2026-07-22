@@ -3,7 +3,7 @@
 <section class="hero hero-banner">
   <div class="hero-badge">Case Investigation</div>
   <h2>Alert #{{ alert.id }}</h2>
-  <p>Review triggered rules, AI assessment, and screening results. Document disposition and file SAR if required.</p>
+  <p>Review AI behavioral assessment, anomaly detection, and screening results. Document disposition and file SAR if required.</p>
 </section>
 
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
@@ -135,8 +135,7 @@
     <li><strong>Receiver:</strong> {{ transaction.receiver_account }}</li>
     <li><strong>Channel:</strong> {{ transaction.channel or 'online' }}</li>
     <li><strong>Destination:</strong> {{ transaction.destination_country or 'ZW' }}</li>
-    <li><strong>Rule score:</strong> {{ transaction.rule_score or 0 }} ({{ transaction.rule_level or 'normal' }})</li>
-    <li><strong>AI assessment:</strong> {{ transaction.ai_risk_level or 'unavailable' }} ({{ "%.0f"|format((transaction.ai_confidence or 0) * 100) }}% confidence)</li>
+    <li><strong>AI risk level:</strong> {{ transaction.ai_risk_level or 'unavailable' }} ({{ "%.0f"|format((transaction.ai_confidence or 0) * 100) }}% confidence)</li>
     {% if transaction.ai_reason %}<li><strong>AI rationale:</strong> {{ transaction.ai_reason }}</li>{% endif %}
     {% if transaction.ctr_required %}<li><strong>CTR required:</strong> Yes</li>{% endif %}
     {% if transaction.sar_required %}<li><strong>SAR required:</strong> Yes</li>{% endif %}
@@ -153,21 +152,6 @@
     <li><strong>PEP flag:</strong> {{ 'Yes' if account_user.pep_flag else 'No' }}</li>
     <li><strong>Risk rating:</strong> {{ account_user.risk_rating or 'standard' }}</li>
     <li><strong>Balance:</strong> ${{ "%.2f"|format(account_user.balance or 0) }}</li>
-  </ul>
-</section>
-{% endif %}
-
-{% if rules %}
-<section class="card table-card">
-  <h3>Rules Triggered</h3>
-  <ul>
-    {% for rule in rules %}
-      <li>
-        <strong>{{ rule.id or rule.rule_id }}:</strong>
-        {{ rule.typology or 'AML Rule' }} (+{{ rule.score_delta }}) — {{ rule.reason }}
-        {% if rule.match_type %}<em>({{ rule.match_type }}, {{ "%.0f"|format((rule.match_score or 1) * 100) }}%)</em>{% endif %}
-      </li>
-    {% endfor %}
   </ul>
 </section>
 {% endif %}
