@@ -287,7 +287,7 @@
 
     return h("div", { className: "admin-layout" },
       h("button", {
-        className: `sidebar-toggle ${sidebarCollapsed ? "expanded" : ""}`,
+        className: "sidebar-toggle",
         onClick: () => setSidebarCollapsed(!sidebarCollapsed),
         type: "button",
         "aria-label": sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"
@@ -547,7 +547,7 @@
 
     return h("div", { className: "admin-layout" },
       h("button", {
-        className: `sidebar-toggle ${sidebarCollapsed ? "expanded" : ""}`,
+        className: "sidebar-toggle",
         onClick: () => setSidebarCollapsed(!sidebarCollapsed),
         type: "button",
         "aria-label": sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"
@@ -732,7 +732,7 @@
 
     return h("div", { className: "admin-layout" },
       h("button", {
-        className: `sidebar-toggle ${sidebarCollapsed ? "expanded" : ""}`,
+        className: "sidebar-toggle",
         onClick: () => setSidebarCollapsed(!sidebarCollapsed),
         type: "button",
         "aria-label": sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"
