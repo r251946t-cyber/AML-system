@@ -172,7 +172,7 @@
     const [feed, setFeed] = useState([]);
     const [status, setStatus] = useState("Connected | live monitoring active");
     const [activeSection, setActiveSection] = useState("overview");
-    const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+    const [sidebarOpen, setSidebarOpen] = useState(false);
 
     const addFeed = (text) => setFeed((current) => trim([{ text, timestamp: new Date().toLocaleTimeString() }, ...current], 25));
     const adjustBalanceFromTransaction = (txn) => {
@@ -302,17 +302,24 @@
     return h("div", { className: "admin-layout" },
       h("button", {
         className: "sidebar-toggle",
-        onClick: () => setSidebarCollapsed(!sidebarCollapsed),
+        onClick: () => setSidebarOpen(true),
         type: "button",
-        "aria-label": sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"
+        "aria-label": "Open sidebar"
       }),
-      h("aside", { className: `admin-sidebar ${sidebarCollapsed ? "collapsed" : ""}` },
+      sidebarOpen && h("div", {
+        className: "sidebar-overlay active",
+        onClick: () => setSidebarOpen(false)
+      }),
+      h("aside", { className: `admin-sidebar ${sidebarOpen ? "open" : ""}` },
         h("h3", null, "Customer Portal"),
         h("nav", null,
           sidebarItems.map((item) => h("button", {
             key: item.id,
             className: activeSection === item.id ? "sidebar-item active" : "sidebar-item",
-            onClick: () => setActiveSection(item.id),
+            onClick: () => {
+              setActiveSection(item.id);
+              setSidebarOpen(false);
+            },
             type: "button"
           }, item.label))
         )
@@ -379,7 +386,7 @@
     const [watchlist, setWatchlist] = useState(initialData.watchlist || []);
     const [stats, setStats] = useState(initialData.system_stats || {});
     const [activeSection, setActiveSection] = useState("overview");
-    const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+    const [sidebarOpen, setSidebarOpen] = useState(false);
 
     const updateBalances = (txn) => {
       const amount = Number(txn.amount || 0);
@@ -562,17 +569,24 @@
     return h("div", { className: "admin-layout" },
       h("button", {
         className: "sidebar-toggle",
-        onClick: () => setSidebarCollapsed(!sidebarCollapsed),
+        onClick: () => setSidebarOpen(true),
         type: "button",
-        "aria-label": sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"
+        "aria-label": "Open sidebar"
       }),
-      h("aside", { className: `admin-sidebar ${sidebarCollapsed ? "collapsed" : ""}` },
+      sidebarOpen && h("div", {
+        className: "sidebar-overlay active",
+        onClick: () => setSidebarOpen(false)
+      }),
+      h("aside", { className: `admin-sidebar ${sidebarOpen ? "open" : ""}` },
         h("h3", null, "Admin Panel"),
         h("nav", null,
           sidebarItems.map((item) => h("button", {
             key: item.id,
             className: activeSection === item.id ? "sidebar-item active" : "sidebar-item",
-            onClick: () => setActiveSection(item.id),
+            onClick: () => {
+              setActiveSection(item.id);
+              setSidebarOpen(false);
+            },
             type: "button"
           }, item.label))
         )
@@ -658,7 +672,7 @@
     const [feed, setFeed] = useState([]);
     const [status, setStatus] = useState("Connected | live alert monitoring active");
     const [activeSection, setActiveSection] = useState("overview");
-    const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+    const [sidebarOpen, setSidebarOpen] = useState(false);
     const filterValue = initialData.filter_value || "all";
 
     const addFeed = (text) => setFeed((current) => trim([{ text, timestamp: new Date().toLocaleTimeString() }, ...current], 30));
@@ -747,17 +761,24 @@
     return h("div", { className: "admin-layout" },
       h("button", {
         className: "sidebar-toggle",
-        onClick: () => setSidebarCollapsed(!sidebarCollapsed),
+        onClick: () => setSidebarOpen(true),
         type: "button",
-        "aria-label": sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"
+        "aria-label": "Open sidebar"
       }),
-      h("aside", { className: `admin-sidebar ${sidebarCollapsed ? "collapsed" : ""}` },
+      sidebarOpen && h("div", {
+        className: "sidebar-overlay active",
+        onClick: () => setSidebarOpen(false)
+      }),
+      h("aside", { className: `admin-sidebar ${sidebarOpen ? "open" : ""}` },
         h("h3", null, "Compliance Panel"),
         h("nav", null,
           sidebarItems.map((item) => h("button", {
             key: item.id,
             className: activeSection === item.id ? "sidebar-item active" : "sidebar-item",
-            onClick: () => setActiveSection(item.id),
+            onClick: () => {
+              setActiveSection(item.id);
+              setSidebarOpen(false);
+            },
             type: "button"
           }, item.label))
         )
