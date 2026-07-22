@@ -301,6 +301,7 @@
     const [transactions, setTransactions] = useState(initialData.transactions || []);
     const [watchlist, setWatchlist] = useState(initialData.watchlist || []);
     const [stats, setStats] = useState(initialData.system_stats || {});
+    const [activeSection, setActiveSection] = useState("overview");
 
     const updateBalances = (txn) => {
       const amount = Number(txn.amount || 0);
@@ -361,101 +362,138 @@
       { label: "Pending CTRs", value: stats.pending_ctrs || 0, caption: "currency reports" },
     ];
 
-    return h(window.React.Fragment, null,
-      h(StatGrid, { items: metricItems }),
-      h("section", { className: "react-dashboard-grid" },
-        h("div", { className: "card action-card" },
-          h(PanelHeading, { title: "Transaction Simulator", meta: h("span", { className: "status-pill" }, "Customers only") }),
-          h("p", { className: "muted-line" }, "Generate realistic deposits, withdrawals, and transfers using registered customer accounts."),
-          h("form", { method: "post", action: "/admin/generate-transactions" },
-            h("label", null, "Number of Transactions"),
-            h("select", { name: "count", defaultValue: "100" },
-              h("option", { value: "100" }, "100"),
-              h("option", { value: "500" }, "500"),
-              h("option", { value: "1000" }, "1000"),
-              h("option", { value: "2000" }, "2000")
-            ),
-            h("button", { type: "submit" }, "Generate Transactions")
-          )
-        ),
-        h("div", { className: "card action-card" },
-          h(PanelHeading, { title: "Manage Users" }),
-          h("form", { method: "post", action: "/admin" },
-            h("input", { type: "hidden", name: "action", value: "update_role" }),
-            h("label", null, "User"),
-            h("select", { name: "user_id" },
-              users.map((user) => h("option", { value: user.id, key: user.id }, `${user.username} (${user.role})`))
-            ),
-            h("label", null, "KYC Status"),
-            h("select", { name: "kyc_status", defaultValue: "pending" },
-              h("option", { value: "pending" }, "Pending"),
-              h("option", { value: "verified" }, "Verified"),
-              h("option", { value: "rejected" }, "Rejected")
-            ),
-            h("button", { type: "submit" }, "Update User")
-          )
-        ),
-        h("div", { className: "card action-card" },
-          h(PanelHeading, { title: "Watchlist Entry" }),
-          h("form", { method: "post", action: "/admin" },
-            h("input", { type: "hidden", name: "action", value: "add_watchlist" }),
-            h("label", null, "Name"),
-            h("input", { name: "wl_name", required: true }),
-            h("label", null, "ID Number"),
-            h("input", { name: "wl_id_number" }),
-            h("label", null, "List Type"),
-            h("select", { name: "wl_type", defaultValue: "internal" },
-              h("option", { value: "internal" }, "Internal"),
-              h("option", { value: "pep" }, "PEP"),
-              h("option", { value: "sanctions" }, "Sanctions")
-            ),
-            h("label", null, "Reason"),
-            h("input", { name: "wl_reason" }),
-            h("button", { type: "submit" }, "Add to Watchlist")
-          )
+    const sidebarItems = [
+      { id: "overview", label: "Overview" },
+      { id: "users", label: "Users" },
+      { id: "transactions", label: "Transactions" },
+      { id: "watchlist", label: "Watchlist" },
+      { id: "activity", label: "Activity" },
+      { id: "settings", label: "Settings" },
+    ];
+
+    const renderSection = () => {
+      switch (activeSection) {
+        case "overview":
+          return h(window.React.Fragment, null,
+            h(StatGrid, { items: metricItems }),
+            h("section", { className: "react-dashboard-grid" },
+              h("div", { className: "card action-card" },
+                h(PanelHeading, { title: "Transaction Simulator", meta: h("span", { className: "status-pill" }, "Customers only") }),
+                h("p", { className: "muted-line" }, "Generate realistic deposits, withdrawals, and transfers using registered customer accounts."),
+                h("form", { method: "post", action: "/admin/generate-transactions" },
+                  h("label", null, "Number of Transactions"),
+                  h("select", { name: "count", defaultValue: "100" },
+                    h("option", { value: "100" }, "100"),
+                    h("option", { value: "500" }, "500"),
+                    h("option", { value: "1000" }, "1000"),
+                    h("option", { value: "2000" }, "2000")
+                  ),
+                  h("button", { type: "submit" }, "Generate Transactions")
+                )
+              ),
+              h("div", { className: "card action-card" },
+                h(PanelHeading, { title: "Manage Users" }),
+                h("form", { method: "post", action: "/admin" },
+                  h("input", { type: "hidden", name: "action", value: "update_role" }),
+                  h("label", null, "User"),
+                  h("select", { name: "user_id" },
+                    users.map((user) => h("option", { value: user.id, key: user.id }, `${user.username} (${user.role})`))
+                  ),
+                  h("label", null, "KYC Status"),
+                  h("select", { name: "kyc_status", defaultValue: "pending" },
+                    h("option", { value: "pending" }, "Pending"),
+                    h("option", { value: "verified" }, "Verified"),
+                    h("option", { value: "rejected" }, "Rejected")
+                  ),
+                  h("button", { type: "submit" }, "Update User")
+                )
+              ),
+              h("div", { className: "card action-card" },
+                h(PanelHeading, { title: "Watchlist Entry" }),
+                h("form", { method: "post", action: "/admin" },
+                  h("input", { type: "hidden", name: "action", value: "add_watchlist" }),
+                  h("label", null, "Name"),
+                  h("input", { name: "wl_name", required: true }),
+                  h("label", null, "ID Number"),
+                  h("input", { name: "wl_id_number" }),
+                  h("label", null, "List Type"),
+                  h("select", { name: "wl_type", defaultValue: "internal" },
+                    h("option", { value: "internal" }, "Internal"),
+                    h("option", { value: "pep" }, "PEP"),
+                    h("option", { value: "sanctions" }, "Sanctions")
+                  ),
+                  h("label", null, "Reason"),
+                  h("input", { name: "wl_reason" }),
+                  h("button", { type: "submit" }, "Add to Watchlist")
+                )
+              )
+            )
+          );
+        case "users":
+          return h(UsersTable, { users });
+        case "transactions":
+          return h(AdminTransactionsPanel, { transactions });
+        case "watchlist":
+          return h(WatchlistPanel, { watchlist });
+        case "activity":
+          return h(ActivityPanel, { activity });
+        case "settings":
+          return h("section", { className: "admin-danger-zone" },
+            h("div", { className: "card action-card" },
+              h(PanelHeading, { title: "System Maintenance" }),
+              h("form", {
+                method: "post",
+                action: "/admin/clear-transactions",
+                onSubmit: (event) => {
+                  if (!window.confirm("Clear all transactions, alerts, reports, recent activity, and the AI model?")) {
+                    event.preventDefault();
+                  }
+                },
+              },
+                h("button", { type: "submit", className: "danger-button" }, "Clear All Transactions")
+              ),
+              h("form", {
+                method: "post",
+                action: "/admin/clear-watchlist",
+                onSubmit: (event) => {
+                  if (!window.confirm("Clear all watchlist entries?")) {
+                    event.preventDefault();
+                  }
+                },
+              },
+                h("button", { type: "submit", className: "danger-button" }, "Clear Watchlist")
+              ),
+              h("form", {
+                method: "post",
+                action: "/admin/migrate-database",
+                onSubmit: (event) => {
+                  if (!window.confirm("Run database migration to add missing columns?")) {
+                    event.preventDefault();
+                  }
+                },
+              },
+                h("button", { type: "submit", className: "danger-button" }, "Migrate Database")
+              )
+            )
+          );
+        default:
+          return null;
+      }
+    };
+
+    return h("div", { className: "admin-layout" },
+      h("aside", { className: "admin-sidebar" },
+        h("h3", null, "Admin Panel"),
+        h("nav", null,
+          sidebarItems.map((item) => h("button", {
+            key: item.id,
+            className: activeSection === item.id ? "sidebar-item active" : "sidebar-item",
+            onClick: () => setActiveSection(item.id),
+            type: "button"
+          }, item.label))
         )
       ),
-      h("section", { className: "react-dashboard-grid" },
-        h(ActivityPanel, { activity }),
-        h(AdminTransactionsPanel, { transactions }),
-        h(WatchlistPanel, { watchlist })
-      ),
-      h(UsersTable, { users }),
-      h("section", { className: "admin-danger-zone" },
-        h("form", {
-          method: "post",
-          action: "/admin/clear-transactions",
-          onSubmit: (event) => {
-            if (!window.confirm("Clear all transactions, alerts, reports, recent activity, and the AI model?")) {
-              event.preventDefault();
-            }
-          },
-        },
-          h("button", { type: "submit", className: "danger-button" }, "Clear All Transactions")
-        ),
-        h("form", {
-          method: "post",
-          action: "/admin/clear-watchlist",
-          onSubmit: (event) => {
-            if (!window.confirm("Clear all watchlist entries?")) {
-              event.preventDefault();
-            }
-          },
-        },
-          h("button", { type: "submit", className: "danger-button" }, "Clear Watchlist")
-        ),
-        h("form", {
-          method: "post",
-          action: "/admin/migrate-database",
-          onSubmit: (event) => {
-            if (!window.confirm("Run database migration to add missing columns?")) {
-              event.preventDefault();
-            }
-          },
-        },
-          h("button", { type: "submit", className: "danger-button" }, "Migrate Database")
-        )
-      )
+      h("main", { className: "admin-content" }, renderSection())
     );
   }
 

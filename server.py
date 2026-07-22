@@ -481,7 +481,21 @@ app.logger.setLevel(logging.INFO)
 
 
 
-socketio = SocketIO(app, cors_allowed_origins="*", manage_session=False)
+# Configure SocketIO with Redis message queue for cross-device broadcasting
+redis_url = os.environ.get("REDIS_URL")
+socketio_kwargs = {
+    "cors_allowed_origins": "*",
+    "manage_session": False,
+}
+
+if redis_url and redis is not None:
+    try:
+        socketio_kwargs["message_queue"] = redis_url
+        socketio_kwargs["channel"] = "aml-socketio"
+    except Exception:
+        pass
+
+socketio = SocketIO(app, **socketio_kwargs)
 
 app.extensions["realtime_broker"] = RealtimeBroker(app=app, socketio=socketio)
 
