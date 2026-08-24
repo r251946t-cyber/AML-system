@@ -75,13 +75,6 @@ from dotenv import load_dotenv
 _ai_training_in_progress = False
 _ai_training_lock = threading.Lock()
 
-# Security: Rate limiting for login attempts
-_login_attempts = defaultdict(list)
-_account_lockouts = defaultdict(dict)
-MAX_LOGIN_ATTEMPTS = 5
-LOCKOUT_DURATION = 900  # 15 minutes
-RATE_LIMIT_WINDOW = 300  # 5 minutes
-
 from flask import (
 
     Flask,
@@ -132,294 +125,109 @@ from config import DevelopmentConfig, ProductionConfig, TestingConfig
 
 from screening import is_registration_blocked, screen_entity, screening_summary
 from aml_rules import CTR_THRESHOLD, assess_rules
+from transaction_simulation import (
+    _random_transaction_amount,
+    _simulation_plan,
+    _simulation_timestamp,
+    _scenario_amount,
+    _simulation_segment_multiplier,
+    _simulation_transaction,
+    _simulation_reason,
+    _history_profile,
+    _ai_profile_for_transaction,
+    _parse_timestamp,
+    NORMAL_TRANSACTION_SCENARIOS,
+    SUSPICIOUS_TRANSACTION_SCENARIOS,
+    SUPER_SUSPICIOUS_TRANSACTION_SCENARIOS,
+    PROFILE_FEATURE_DEFAULTS,
+)
 
-
-# ============================================================================
-# Real-time Event Broadcasting (Consolidated from realtime.py)
-# ============================================================================
-
-try:
-    import redis
-except ImportError:
-    redis = None
-
-try:
-    from kafka import KafkaProducer
-except ImportError:
-    KafkaProducer = None
-
-
-class RealtimeBroker:
-    """Real-time event broker for WebSocket/Redis/Kafka broadcasting."""
-    def __init__(self, app=None, socketio=None):
-        self.app = app
-        self.socketio = socketio
-        self._subscribers = []
-        self._redis_client = None
-        self._redis_pubsub = None
-        self._kafka_producer = None
-        self._instance_id = str(uuid.uuid4())
-        self._init_brokers()
-        self._start_redis_listener()
-
-    def _init_brokers(self):
-        redis_url = os.environ.get("REDIS_URL")
-        if redis_url and redis is not None:
-            try:
-                # redis-py expects numeric socket option constants, not their
-                # string names. Windows does not expose every Linux setting.
-                keepalive_options = {}
-                for option_name, value in (
-                    ("TCP_KEEPIDLE", 1),
-                    ("TCP_KEEPINTVL", 1),
-                    ("TCP_KEEPCNT", 3),
-                ):
-                    option = getattr(socket, option_name, None)
-                    if option is not None:
-                        keepalive_options[option] = value
-                self._redis_client = redis.from_url(
-                    redis_url,
-                    decode_responses=True,
-                    socket_connect_timeout=2.0,
-                    socket_timeout=2.0,
-                    socket_keepalive=True,
-                    socket_keepalive_options=keepalive_options or None,
-                )
-                self._redis_client.ping()
-                if self.app:
-                    self.app.logger.info(f"RealtimeBroker connected to Redis: {redis_url}")
-            except Exception as e:
-                if self.app:
-                    self.app.logger.error(f"RealtimeBroker failed to connect to Redis: {e}")
-                self._redis_client = None
-
-        kafka_bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS")
-        # Skip Kafka if not configured or set to localhost (won't work in cloud)
-        if kafka_bootstrap and KafkaProducer is not None and "localhost" not in kafka_bootstrap and "127.0.0.1" not in kafka_bootstrap:
-            try:
-                self._kafka_producer = KafkaProducer(
-                    bootstrap_servers=[server.strip() for server in kafka_bootstrap.split(",") if server.strip()],
-                    api_version_auto_timeout_ms=100,
-                    request_timeout_ms=200,
-                    max_block_ms=200,
-                    value_serializer=lambda value: json.dumps(value).encode("utf-8"),
-                )
-            except Exception:
-                self._kafka_producer = None
-
-    def _start_redis_listener(self):
-        """Subscribe to Redis pub/sub for cross-instance event fan-out."""
-        if self._redis_client is None:
-            if self.app:
-                self.app.logger.warning("Redis client not available, skipping Redis listener")
-            return
-        try:
-            self._redis_pubsub = self._redis_client.pubsub(ignore_subscribe_messages=True)
-            self._redis_pubsub.subscribe("aml-events")
-            if self.app:
-                self.app.logger.info("Redis listener started, subscribed to 'aml-events' channel")
-
-            def _listen():
-                consecutive_errors = 0
-                max_consecutive_errors = 5
-                if self.app:
-                    self.app.logger.info("Redis listener thread started")
-                while True:
-                    try:
-                        # Use get_message with timeout for faster response
-                        raw = self._redis_pubsub.get_message(timeout=0.1)
-                        if raw and raw.get("type") == "message":
-                            try:
-                                message = json.loads(raw["data"])
-                                if message.get("publisher") == self._instance_id:
-                                    if self.app:
-                                        self.app.logger.debug(f"Skipping own event from Redis: {message.get('event')}")
-                                    continue
-                                event_name = message.get("event")
-                                # Skip internal SocketIO events to prevent infinite loops
-                                if event_name in ['connect', 'disconnect', 'heartbeat']:
-                                    if self.app:
-                                        self.app.logger.debug(f"Skipping internal SocketIO event from Redis: {event_name}")
-                                    continue
-                                if self.app:
-                                    self.app.logger.info(f"Received event from Redis: {event_name}")
-                                self._local_deliver(event_name, message.get("data"))
-                                consecutive_errors = 0  # Reset error counter on success
-                            except Exception as e:
-                                if self.app:
-                                    self.app.logger.error(f"Error processing Redis message: {e}")
-                                consecutive_errors += 1
-                    except Exception as e:
-                        consecutive_errors += 1
-                        if self.app:
-                            self.app.logger.error(f"Redis listener error: {e}")
-                        # If too many consecutive errors, wait longer before reconnecting
-                        if consecutive_errors >= max_consecutive_errors:
-                            if self.app:
-                                self.app.logger.warning(f"Too many consecutive Redis errors ({consecutive_errors}), waiting 5 seconds before reconnect")
-                            import time
-                            time.sleep(5)
-                        else:
-                            # Brief pause before reconnecting
-                            import time
-                            time.sleep(0.5)
-                        try:
-                            self._redis_pubsub = self._redis_client.pubsub(ignore_subscribe_messages=True)
-                            self._redis_pubsub.subscribe("aml-events")
-                        except:
-                            pass
-
-            thread = threading.Thread(target=_listen, daemon=True)
-            thread.start()
-        except Exception as e:
-            if self.app:
-                self.app.logger.error(f"Failed to start Redis listener: {e}")
-            self._redis_pubsub = None
-
-    def _local_deliver(self, event_name, payload):
-        if not event_name:
-            return
-        message = {"event": event_name, "data": payload}
-        delivered = set()
-        app_subscribers = self.app.config.get("STREAM_SUBSCRIBERS", []) if self.app is not None else []
-        for subscriber in list(self._subscribers) + list(app_subscribers):
-            subscriber_id = id(subscriber)
-            if subscriber_id in delivered:
-                continue
-            delivered.add(subscriber_id)
-            try:
-                subscriber.put_nowait(message)
-            except Exception:
-                pass
-        
-        # Flask-SocketIO's emit is safe to call from worker/background threads.
-        # Starting a new OS thread for every event eventually exhausts resources
-        # during sustained transaction activity and makes connected clients appear
-        # to stop receiving updates.
-        if self.socketio is not None:
-            try:
-                self.socketio.emit(event_name, payload)
-                if self.app:
-                    self.app.logger.info(f"SocketIO broadcast event: {event_name}")
-            except Exception as e:
-                if self.app:
-                    self.app.logger.error(f"SocketIO broadcast failed for {event_name}: {e}")
-
-    def set_socketio(self, socketio):
-        self.socketio = socketio
-
-    def add_subscriber(self, queue):
-        self._subscribers.append(queue)
-        if self.app is not None:
-            app_subscribers = self.app.config.setdefault("STREAM_SUBSCRIBERS", [])
-            if queue not in app_subscribers:
-                app_subscribers.append(queue)
-        return queue
-
-    def remove_subscriber(self, queue):
-        if queue in self._subscribers:
-            self._subscribers.remove(queue)
-        if self.app is not None:
-            app_subscribers = self.app.config.get("STREAM_SUBSCRIBERS", [])
-            if queue in app_subscribers:
-                app_subscribers.remove(queue)
-
-    def publish(self, event_name, payload):
-        # Skip publishing internal SocketIO events to Redis to prevent infinite loops
-        if event_name in ['connect', 'disconnect', 'heartbeat']:
-            if self.app:
-                self.app.logger.info(f"Skipping Redis publish for internal event: {event_name}")
-            self._local_deliver(event_name, payload)
-            return
-
-        message = {"event": event_name, "data": payload, "publisher": self._instance_id}
-        if self.app:
-            self.app.logger.info(f"RealtimeBroker.publish called for event: {event_name}")
-        self._local_deliver(event_name, payload)
-
-        # Publish to Redis in background thread to avoid blocking
-        if self._redis_client is not None:
-            def publish_to_redis():
-                try:
-                    self._redis_client.publish("aml-events", json.dumps(message))
-                    if self.app:
-                        self.app.logger.info(f"Published event to Redis: {event_name}")
-                except Exception as e:
-                    if self.app:
-                        self.app.logger.error(f"Failed to publish event to Redis: {e}")
-            threading.Thread(target=publish_to_redis, daemon=True).start()
-        else:
-            if self.app:
-                self.app.logger.warning("Redis client not available, event not published to Redis")
-
-        if self._kafka_producer is not None:
-            try:
-                self._kafka_producer.send("aml-events", message)
-            except Exception:
-                pass
-
-    def queue_for_offline_user(self, user_id, event_name, payload):
-        """Queue message for offline user to deliver when they reconnect"""
-        if self._redis_client is None:
-            if self.app:
-                self.app.logger.warning("Redis not available, cannot queue offline message")
-            return
-        
-        try:
-            offline_queue_key = f"offline_queue:user:{user_id}"
-            message = {"event": event_name, "data": payload, "timestamp": int(time.time())}
-            self._redis_client.lpush(offline_queue_key, json.dumps(message))
-            self._redis_client.ltrim(offline_queue_key, 0, 99)  # Keep last 100 messages
-            self._redis_client.expire(offline_queue_key, 86400)  # 24 hour TTL
-            if self.app:
-                self.app.logger.info(f"Queued event {event_name} for offline user {user_id}")
-        except Exception as e:
-            if self.app:
-                self.app.logger.error(f"Failed to queue offline message for user {user_id}: {e}")
-
-    def get_offline_queue(self, user_id):
-        """Retrieve queued messages for user who just reconnected"""
-        if self._redis_client is None:
-            return []
-        
-        try:
-            offline_queue_key = f"offline_queue:user:{user_id}"
-            messages = self._redis_client.lrange(offline_queue_key, 0, -1)
-            self._redis_client.delete(offline_queue_key)
-            return [json.loads(msg) for msg in messages]
-        except Exception as e:
-            if self.app:
-                self.app.logger.error(f"Failed to retrieve offline queue for user {user_id}: {e}")
-            return []
-
-    def stream_response(self):
-        queue = Queue()
-        self.add_subscriber(queue)
-
-        def generate():
-            try:
-                yield ": connected\n\n"
-                while True:
-                    try:
-                        message = queue.get(timeout=1)
-                    except Empty:
-                        yield ": heartbeat\n\n"
-                        continue
-                    yield f"event: {message['event']}\n"
-                    yield f"data: {json.dumps(message['data'])}\n\n"
-            finally:
-                if queue in self._subscribers:
-                    self._subscribers.remove(queue)
-                if self.app is not None:
-                    app_subscribers = self.app.config.get("STREAM_SUBSCRIBERS", [])
-                    if queue in app_subscribers:
-                        app_subscribers.remove(queue)
-
-        return Response(generate(), mimetype="text/event-stream")
-
-
-
-
+# Import from modularized components
+from database import (
+    DatabaseAdapter,
+    is_postgres_database_url,
+    is_mysql_database_url,
+    connect_db,
+    get_schema_sql,
+)
+from security import (
+    check_login_attempts,
+    record_login_attempt,
+    add_security_headers,
+)
+from behavioral_profiling import (
+    get_customer_behavioral_profile,
+    save_customer_behavioral_profile,
+    build_or_update_customer_profile,
+    assess_transaction_behavioral_risk,
+)
+from alerts import (
+    create_alert_if_needed,
+    update_customer_risk_rating,
+    _generate_sar_ref,
+    _generate_ctr_ref,
+    get_alert_statistics,
+)
+from realtime import RealtimeBroker
+from utils import (
+    serialize_value,
+    serialize_row,
+    serialize_rows,
+    _json_safe,
+    request_page,
+    _user_balance_payload,
+    _transaction_payload,
+    _stats_payload,
+)
+from users import (
+    validate_id_number,
+    is_username_reserved,
+    get_staff_accounts,
+    create_user,
+    get_user_by_account_number,
+    get_user_by_username,
+    get_user_by_id,
+    update_user_balance,
+    update_user_kyc_status,
+    update_user_risk_rating,
+    get_all_users,
+    get_users_by_role,
+    update_user_last_login,
+    verify_password,
+    ID_NUMBER_PATTERN,
+    ID_NUMBER_FORMAT_MESSAGE,
+    STAFF_ACCOUNTS,
+    RESERVED_STAFF_USERNAMES,
+)
+from transactions import (
+    set_rule_engine_enabled,
+    is_rule_engine_enabled,
+    _risk_level_from_score,
+    _calibrate_generated_transaction_risk,
+    _combine_rule_ai_risk,
+    get_transaction_by_id,
+    get_transactions_by_account,
+    get_all_transactions,
+    get_transactions_by_risk_level,
+    get_transaction_statistics,
+    RISK_RANK,
+    AI_RISK_SCORES,
+)
+from reports import (
+    create_sar_report,
+    create_ctr_report,
+    get_sar_reports,
+    get_sar_reports_by_account,
+    get_sar_by_id,
+    get_ctr_reports,
+    get_ctr_reports_by_account,
+    get_ctr_by_id,
+    update_sar_status,
+    update_ctr_status,
+    get_report_statistics,
+    log_system_activity,
+    get_activity_log,
+)
 
 
 load_dotenv()
@@ -436,197 +244,189 @@ app.config.from_object(
 
 # Security: Add secure headers
 @app.after_request
-def add_security_headers(response):
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['X-XSS-Protection'] = '1; mode=block'
-    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
-    return response
-
-# Security: Rate limiting and account lockout functions
-def check_login_attempts(identifier):
-    """Check if identifier is locked out due to too many failed attempts."""
-    if identifier in _account_lockouts:
-        lockout_data = _account_lockouts[identifier]
-        if time.time() < lockout_data['until']:
-            remaining_time = int(lockout_data['until'] - time.time())
-            return False, f"Account locked. Try again in {remaining_time} seconds."
-        else:
-            # Lockout expired, clear it
-            del _account_lockouts[identifier]
-            _login_attempts[identifier] = []
-    return True, None
-
-def record_login_attempt(identifier, success):
-    """Record login attempt for rate limiting."""
-    current_time = time.time()
-    
-    # Clean old attempts outside the rate limit window
-    _login_attempts[identifier] = [
-        attempt for attempt in _login_attempts[identifier]
-        if current_time - attempt < RATE_LIMIT_WINDOW
-    ]
-    
-    if success:
-        # Clear failed attempts on successful login
-        _login_attempts[identifier] = []
-        if identifier in _account_lockouts:
-            del _account_lockouts[identifier]
-    else:
-        # Record failed attempt
-        _login_attempts[identifier].append(current_time)
-        
-        # Check if should lockout
-        if len(_login_attempts[identifier]) >= MAX_LOGIN_ATTEMPTS:
-            _account_lockouts[identifier] = {
-                'until': current_time + LOCKOUT_DURATION
-            }
-            return True  # Account is now locked
-    
-    return False  # Account not locked
-
-# behavioral_profiler is imported from ai_core module
-# No need to reinitialize - using global instance from ai_core
+def add_security_headers_wrapper(response):
+    return add_security_headers(response)
 
 
-def get_customer_behavioral_profile(conn, account_number: str) -> Optional[CustomerBehavioralProfile]:
-    """Load customer's behavioral profile from database."""
-    row = conn.execute(
-        "SELECT profile_data FROM behavioral_profiles WHERE account_number=?",
-        (account_number,)
-    ).fetchone()
-    
-    if not row or not row["profile_data"]:
-        return None
-    
-    try:
-        profile_data = json.loads(row["profile_data"])
-        return behavioral_profiler.dict_to_profile(profile_data)
-    except (json.JSONDecodeError, TypeError):
-        return None
+# ============================================================================
+# Database Connection
+# ============================================================================
+
+def get_db():
+    if "db" not in g:
+        g.db = connect_db(app.config["DATABASE"])
+    return g.db
 
 
-def save_customer_behavioral_profile(conn, profile: CustomerBehavioralProfile):
-    """Save customer's behavioral profile to database."""
-    profile_dict = behavioral_profiler.profile_to_dict(profile)
-    profile_json = json.dumps(profile_dict)
-    
-    existing = conn.execute(
-        "SELECT account_number FROM behavioral_profiles WHERE account_number=?",
-        (profile.account_number,)
-    ).fetchone()
-    
-    if existing:
-        conn.execute(
-            "UPDATE behavioral_profiles SET profile_data=?, last_updated=?, total_transactions=? WHERE account_number=?",
-            (profile_json, profile.last_updated, profile.total_transactions, profile.account_number)
-        )
-    else:
-        conn.execute(
-            "INSERT INTO behavioral_profiles (account_number, profile_data, last_updated, total_transactions) VALUES (?, ?, ?, ?)",
-            (profile.account_number, profile_json, profile.last_updated, profile.total_transactions)
-        )
+@app.teardown_appcontext
+def close_db(_):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
 
 
-def build_or_update_customer_profile(
-    conn, account_number: str, exclude_transaction_id=None, reference_timestamp=None
-) -> Optional[CustomerBehavioralProfile]:
-    """Build or update customer's behavioral profile from transaction history."""
-    # Get customer's transaction history
-    transactions = conn.execute(
-        """
-        SELECT id, amount, transaction_type, sender_account, receiver_account, 
-               channel, timestamp, destination_country
-        FROM transactions
-        WHERE (sender_account=? OR receiver_account=?)
-          AND (? IS NULL OR id<>?)
-          AND (? IS NULL OR timestamp<?)
-        ORDER BY timestamp DESC
-        LIMIT 500
-        """,
-        (account_number, account_number, exclude_transaction_id, exclude_transaction_id,
-         reference_timestamp, reference_timestamp)
-    ).fetchall()
+# ============================================================================
+# Schema Initialization
+# ============================================================================
+
+def init_db():
+    conn = connect_db(app.config["DATABASE"])
+    conn.executescript(get_schema_sql(app.config["DATABASE"]))
     
-    if not transactions:
-        return None
+    # SQLite migration: add new columns to existing tables
+    if not is_postgres_database_url(app.config["DATABASE"]) and not is_mysql_database_url(app.config["DATABASE"]):
+        _migrate_sqlite(conn)
+    elif is_mysql_database_url(app.config["DATABASE"]):
+        _migrate_mysql(conn)
+    elif is_postgres_database_url(app.config["DATABASE"]):
+        _migrate_postgres(conn)
     
-    # Convert to list of dicts
-    tx_list = [dict(tx) for tx in transactions]
-    
-    # Extract profile (balance history not available from transactions table)
-    profile = behavioral_profiler.extract_profile_from_history(
-        account_number, tx_list, None
-    )
-    
-    if profile:
-        save_customer_behavioral_profile(conn, profile)
-    
-    return profile
+    conn.commit()
+    conn.close()
 
 
-def assess_transaction_behavioral_risk(
-    conn,
-    transaction: Dict[str, Any],
-    sender_account: str
-) -> Tuple[float, str, str, List[str]]:
-    """
-    Assess transaction risk using behavioral profiling.
-    
-    Engineering Constraint: No Circular Flagging
-    - Behavioral scoring is based strictly on statistical anomalies (velocity, amount deviation, counterparty network)
-    - Past alerts, alert counts, or historical risk ratings are NOT used in scoring
-    - Cold-start grace period: Users with < 5 transactions get neutral baseline, rely on global ML model
-    
-    Returns:
-        (risk_score, risk_level, reason, anomaly_reasons)
-    """
-    # Get or build customer profile
-    profile = get_customer_behavioral_profile(conn, sender_account)
-    
-    if not profile:
-        # Try to build profile from history
-        profile = build_or_update_customer_profile(
-            conn, sender_account, exclude_transaction_id=transaction.get("id"), 
-            reference_timestamp=transaction.get("timestamp")
-        )
-    
-    if not profile:
-        # Insufficient data for behavioral analysis - cold start
-        # Return neutral baseline to rely on global ML model (ai_core.py)
-        return 0, "normal", "Cold-start: insufficient transaction history for behavioral analysis (< 5 transactions)", []
-    
-    # Cold-start grace period: check if user has < 5 transactions
-    if profile.total_transactions < 5:
-        # Return neutral baseline to rely on global ML model
-        return 0, "normal", f"Cold-start: building behavioral baseline ({profile.total_transactions}/5 transactions)", []
-    
-    # Detect anomaly using statistical features only (velocity, amount deviation, counterparty network)
-    anomaly = behavioral_profiler.detect_anomaly(profile, transaction)
-    
-    # Update profile with this transaction (pass anomaly score for adaptive learning)
-    updated_profile = behavioral_profiler.update_profile(profile, transaction, anomaly.overall_anomaly_score)
-    save_customer_behavioral_profile(conn, updated_profile)
-    
-    # Convert anomaly score to risk score (0-100)
-    risk_score = int(anomaly.overall_anomaly_score)
-    
-    # Map anomaly risk level to standard risk levels
-    risk_level_mapping = {
-        "normal": "normal",
-        "low": "low", 
-        "medium": "suspicious",
-        "high": "high_risk",
-        "critical": "critical"
+def _migrate_sqlite(conn):
+    """Add columns that may not exist in older DB files."""
+    migrations = {
+        "users": ["kyc_status TEXT DEFAULT 'pending'", "pep_flag INTEGER DEFAULT 0", "risk_rating TEXT DEFAULT 'standard'", "wealth_segment TEXT DEFAULT 'average'"],
+        "transactions": ["currency TEXT DEFAULT 'USD'", "channel TEXT DEFAULT 'online'",
+                         "rule_score REAL DEFAULT 0", "rule_level TEXT DEFAULT 'normal'",
+                         "rule_reason TEXT", "ai_risk_level TEXT", "ai_confidence REAL DEFAULT 0",
+                         "ai_reason TEXT",
+                         "rules_triggered TEXT DEFAULT '[]'", "ctr_required INTEGER DEFAULT 0",
+                         "sar_required INTEGER DEFAULT 0", "destination_country TEXT DEFAULT 'ZW'",
+                         "screening_hits TEXT", "reviewed_by TEXT", "reviewed_at TEXT"],
+        "alerts": ["rules_triggered TEXT DEFAULT '[]'", "status TEXT DEFAULT 'open'",
+                   "assigned_to TEXT", "case_notes TEXT", "resolved_at TEXT", "resolved_by TEXT"],
+        "behavioral_profiles": ["account_number TEXT PRIMARY KEY", "profile_data TEXT", "last_updated TEXT", "total_transactions INTEGER DEFAULT 0"],
     }
-    risk_level = risk_level_mapping.get(anomaly.risk_level, "normal")
-    
-    # Build reason
-    reason = anomaly.behavioral_context
-    if anomaly.anomaly_reasons:
-        reason += " " + "; ".join(anomaly.anomaly_reasons)
-    
-    return risk_score, risk_level, reason, anomaly.anomaly_reasons
+
+    for table, cols in migrations.items():
+        existing = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        for col_def in cols:
+            col_name = col_def.split()[0]
+            if col_name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+
+
+def _migrate_mysql(conn):
+    """Widen older MySQL VARCHAR columns that store AML evidence JSON/text."""
+    column_migrations = {
+        "users": [
+            ("kyc_status", "VARCHAR(255) DEFAULT 'pending'"),
+            ("pep_flag", "INTEGER DEFAULT 0"),
+            ("risk_rating", "VARCHAR(255) DEFAULT 'standard'"),
+            ("wealth_segment", "VARCHAR(255) DEFAULT 'average'"),
+        ],
+        "transactions": [
+            ("currency", "VARCHAR(255) DEFAULT 'USD'"),
+            ("channel", "VARCHAR(255) DEFAULT 'online'"),
+            ("rule_score", "DOUBLE DEFAULT 0"),
+            ("rule_level", "VARCHAR(255) DEFAULT 'normal'"),
+            ("rule_reason", "LONGTEXT"),
+            ("ai_risk_level", "VARCHAR(255)"),
+            ("ai_confidence", "DOUBLE DEFAULT 0"),
+            ("ai_reason", "LONGTEXT"),
+            ("rules_triggered", "LONGTEXT DEFAULT '[]'"),
+            ("ctr_required", "INTEGER DEFAULT 0"),
+            ("sar_required", "INTEGER DEFAULT 0"),
+            ("destination_country", "VARCHAR(255) DEFAULT 'ZW'"),
+            ("screening_hits", "LONGTEXT"),
+            ("reviewed_by", "VARCHAR(255)"),
+            ("reviewed_at", "VARCHAR(255)"),
+            ("generated_label", "VARCHAR(50)"),
+        ],
+        "alerts": [
+            ("rules_triggered", "LONGTEXT DEFAULT '[]'"),
+            ("status", "VARCHAR(255) DEFAULT 'open'"),
+            ("assigned_to", "VARCHAR(255)"),
+            ("case_notes", "LONGTEXT"),
+            ("resolved_at", "VARCHAR(255)"),
+            ("resolved_by", "VARCHAR(255)"),
+        ],
+        "behavioral_profiles": [
+            ("account_number", "VARCHAR(255) PRIMARY KEY"),
+            ("profile_data", "LONGTEXT"),
+            ("last_updated", "VARCHAR(255)"),
+            ("total_transactions", "INTEGER DEFAULT 0"),
+        ],
+    }
+
+    for table, columns in column_migrations.items():
+        try:
+            existing = {
+                row["Field"]
+                for row in conn.execute(f"SHOW COLUMNS FROM {table}").fetchall()
+            }
+            for column_name, column_def in columns:
+                if column_name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {column_def}")
+        except Exception as e:
+            logging.error(f"Error adding columns to {table}: {e}")
+
+
+def _migrate_postgres(conn):
+    """Add columns for PostgreSQL databases."""
+    column_migrations = {
+        "users": [
+            ("kyc_status", "TEXT DEFAULT 'pending'"),
+            ("pep_flag", "INTEGER DEFAULT 0"),
+            ("risk_rating", "TEXT DEFAULT 'standard'"),
+            ("wealth_segment", "TEXT DEFAULT 'average'"),
+        ],
+        "transactions": [
+            ("currency", "TEXT DEFAULT 'USD'"),
+            ("channel", "TEXT DEFAULT 'online'"),
+            ("rule_score", "DOUBLE PRECISION DEFAULT 0"),
+            ("rule_level", "TEXT DEFAULT 'normal'"),
+            ("rule_reason", "TEXT"),
+            ("ai_risk_level", "TEXT"),
+            ("ai_confidence", "DOUBLE PRECISION DEFAULT 0"),
+            ("ai_reason", "TEXT"),
+            ("rules_triggered", "TEXT DEFAULT '[]'"),
+            ("ctr_required", "INTEGER DEFAULT 0"),
+            ("sar_required", "INTEGER DEFAULT 0"),
+            ("destination_country", "TEXT DEFAULT 'ZW'"),
+            ("screening_hits", "TEXT"),
+            ("reviewed_by", "TEXT"),
+            ("reviewed_at", "TEXT"),
+            ("generated_label", "VARCHAR(50)"),
+        ],
+        "alerts": [
+            ("rules_triggered", "TEXT DEFAULT '[]'"),
+            ("status", "TEXT DEFAULT 'open'"),
+            ("assigned_to", "TEXT"),
+            ("case_notes", "TEXT"),
+            ("resolved_at", "TEXT"),
+            ("resolved_by", "TEXT"),
+        ],
+        "behavioral_profiles": [
+            ("account_number", "TEXT PRIMARY KEY"),
+            ("profile_data", "TEXT"),
+            ("last_updated", "TEXT"),
+            ("total_transactions", "INTEGER DEFAULT 0"),
+        ],
+    }
+
+    for table, columns in column_migrations.items():
+        try:
+            existing = {
+                row["column_name"]
+                for row in conn.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name='{table}'").fetchall()
+            }
+            for column_name, column_def in columns:
+                if column_name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {column_def}")
+        except Exception as e:
+            logging.error(f"Error adding columns to {table}: {e}")
+
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+PAGE_SIZE = 25  # rows per paginated list
+VALID_TRANSACTION_TYPES = {"deposit", "withdraw", "transfer"}
 
 if app.config.get("TESTING"):
 
@@ -787,762 +587,83 @@ def handle_disconnect():
             app.logger.info(f"User {user_id} (role: {role}) disconnected from SocketIO")
 
 
-
-ID_NUMBER_PATTERN = re.compile(r"^\d{2}-\d{6,7}[A-Z]\d{2}$")
-
-ID_NUMBER_FORMAT_MESSAGE = "ID number must use the format 00-000000A00, for example 08-995728P34."
-
-
-
-PAGE_SIZE = 25  # rows per paginated list
-
-VALID_TRANSACTION_TYPES = {"deposit", "withdraw", "transfer"}
-
-
-
-AI_RISK_SCORES = {
-
-    "normal": 10,
-
-    "suspicious": 55,
-
-    "super_suspicious": 90,
-
-}
-
-
-
-STAFF_ACCOUNTS = {
-
-    "Admin": {
-
-        "password": os.environ.get("ADMIN_PASSWORD", "Admin123"),
-
-        "role": "admin",
-
-        "email": os.environ.get("ADMIN_EMAIL", "admin@example.com"),
-
-        "id_number": "63-1000001A01",
-
-        "account_number": "ACC1001",
-
-    },
-
-    "Compliance": {
-
-        "password": os.environ.get("COMPLIANCE_PASSWORD", "Compliance123"),
-
-        "role": "compliance",
-
-        "email": os.environ.get("COMPLIANCE_EMAIL", "compliance@example.com"),
-
-        "id_number": "63-1000002A02",
-
-        "account_number": "ACC1002",
-
-    },
-
-}
-
-RESERVED_STAFF_USERNAMES = {username.lower() for username in STAFF_ACCOUNTS}
-
-
-
-
-
-# ───────────────────────────────────────────────────────────── DB adapter ──
-
-
-
-class DatabaseAdapter:
-
-    def __init__(self, connection, engine):
-
-        self.connection = connection
-
-        self.engine = engine
-
-
-
-    @property
-
-    def is_postgres(self):
-
-        return self.engine == "postgres"
-
-
-
-    @property
-
-    def is_mysql(self):
-
-        return self.engine == "mysql"
-
-
-
-    def normalize_query(self, query):
-
-        if self.is_postgres or self.is_mysql:
-
-            return query.replace("?", "%s")
-
-        return query
-
-
-
-    def execute(self, query, params=()):
-
-        query = self.normalize_query(query)
-
-        if self.is_postgres:
-
-            from psycopg2.extras import RealDictCursor
-
-            cursor = self.connection.cursor(cursor_factory=RealDictCursor)
-
-            cursor.execute(query, params)
-
-            return cursor
-
-        if self.is_mysql:
-
-            cursor = self.connection.cursor(dictionary=True, buffered=True)
-
-            cursor.execute(query, params)
-
-            return cursor
-
-        return self.connection.execute(query, params)
-
-
-
-    def executescript(self, script):
-
-        if self.is_postgres or self.is_mysql:
-
-            for stmt in [s.strip() for s in script.split(";") if s.strip()]:
-
-                cur = self.connection.cursor()
-
-                try:
-
-                    cur.execute(self.normalize_query(stmt))
-
-                finally:
-
-                    cur.close()
-
+# ============================================================================
+# Event Broadcasting Helper
+# ============================================================================
+
+def broadcast_event(event_name, payload):
+    """Broadcast event using RealtimeBroker."""
+    broker = app.extensions.get("realtime_broker")
+    if broker:
+        broker.publish(event_name, payload)
+
+
+# ============================================================================
+# AI Training Functions
+# ============================================================================
+
+def _ai_training_rows(rows):
+    histories = {}
+    enriched = []
+    for row in rows:
+        sender = row["sender_account"]
+        history = histories.setdefault(sender, {"amounts": [], "recipients": set(), "events": [], "transactions": []})
+        profile = _history_profile(row["amount"], row["receiver_account"], row["timestamp"], history)
+        item = dict(row)
+        item.update(profile)
+        enriched.append(item)
+        history["amounts"].append(float(row["amount"]))
+        history["recipients"].add(row["receiver_account"])
+        history["events"].append((_parse_timestamp(row["timestamp"]), float(row["amount"])))
+        history["transactions"].append(dict(row))
+    return enriched
+
+
+def _train_ai_model_from_db(conn, emit_events=True):
+    # Prevent concurrent AI training
+    global _ai_training_in_progress, _ai_training_lock
+    with _ai_training_lock:
+        if _ai_training_in_progress:
+            if app:
+                app.logger.info("AI training already in progress, skipping")
             return None
-
-        self.connection.executescript(script)
-
-
-
-    def commit(self):
-
-        self.connection.commit()
-
-
-
-    def rollback(self):
-
-        self.connection.rollback()
-
-
-
-    def close(self):
-
-        self.connection.close()
-
-
-
-
-
-def is_postgres_database_url(url):
-
-    return bool(url) and url.startswith(("postgres://", "postgresql://"))
-
-
-
-
-
-def is_mysql_database_url(url):
-
-    return bool(url) and url.startswith(("mysql://", "mysql+mysqlconnector://"))
-
-
-
-
-
-def connect_db():
-
-    database_url = app.config["DATABASE"]
-
-    if is_postgres_database_url(database_url):
-
-        import psycopg2
-
-        conn = psycopg2.connect(database_url)
-
-        conn.autocommit = False
-
-        return DatabaseAdapter(conn, "postgres")
-
-    if is_mysql_database_url(database_url):
-
-        import mysql.connector
-
-        parsed = urlparse(database_url)
-
-        conn = mysql.connector.connect(
-
-            host=parsed.hostname or "localhost",
-
-            port=parsed.port or 3306,
-
-            user=unquote(parsed.username or ""),
-
-            password=unquote(parsed.password or ""),
-
-            database=parsed.path.lstrip("/"),
-
-            charset="utf8mb4",
-
-            collation="utf8mb4_unicode_ci",
-
-        )
-
-        return DatabaseAdapter(conn, "mysql")
-
-    # sqlite3.connect accepts a filesystem path, not a SQLAlchemy-style URL.
-    # Supporting sqlite:/// here keeps local, test, and Railway fallback
-    # deployments from failing with "unable to open database file".
-    if database_url.startswith("sqlite:///"):
-        database_url = database_url[len("sqlite:///"):]
-    conn = sqlite3.connect(database_url)
-
-    conn.row_factory = sqlite3.Row
-
-    return DatabaseAdapter(conn, "sqlite")
-
-
-
-
-
-def get_db():
-
-    if "db" not in g:
-
-        g.db = connect_db()
-
-    return g.db
-
-
-
-
-
-@app.teardown_appcontext
-
-def close_db(_):
-
-    db = g.pop("db", None)
-
-    if db is not None:
-
-        db.close()
-
-
-
-
-
-# ───────────────────────────────────────────────────────── Schema / seed ──
-
-
-
-def get_schema_sql():
-
-    """Return DB-engine-appropriate DDL."""
-
-    is_pg = is_postgres_database_url(app.config["DATABASE"])
-
-    is_my = is_mysql_database_url(app.config["DATABASE"])
-
-
-
-    if is_my:
-
-        ai, pk_type, text_type, long_text_type, real_type = "AUTO_INCREMENT", "BIGINT", "VARCHAR(255)", "LONGTEXT", "DOUBLE"
-
-    elif is_pg:
-
-        ai, pk_type, text_type, long_text_type, real_type = "GENERATED ALWAYS AS IDENTITY", "BIGINT", "TEXT", "TEXT", "DOUBLE PRECISION"
-
-    else:
-
-        ai, pk_type, text_type, long_text_type, real_type = "AUTOINCREMENT", "INTEGER", "TEXT", "TEXT", "REAL"
-
-
-
-    if is_pg:
-
-        pk_clause = lambda col: f"{col} BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY"
-
-    elif is_my:
-
-        pk_clause = lambda col: f"{col} BIGINT AUTO_INCREMENT PRIMARY KEY"
-
-    else:
-
-        pk_clause = lambda col: f"{col} INTEGER PRIMARY KEY AUTOINCREMENT"
-
-
-
-    uniq = "VARCHAR(255) UNIQUE NOT NULL" if is_my else ("TEXT UNIQUE NOT NULL")
-
-
-
-    return f"""
-
-    CREATE TABLE IF NOT EXISTS users (
-
-        {pk_clause("id")},
-
-        username {uniq},
-
-        email {uniq},
-
-        id_number {uniq},
-
-        password_hash {text_type} NOT NULL,
-
-        role {text_type} NOT NULL,
-
-        account_number {uniq},
-
-        balance {real_type} DEFAULT 0,
-
-        kyc_status {text_type} DEFAULT 'pending',
-
-        pep_flag INTEGER DEFAULT 0,
-
-        risk_rating {text_type} DEFAULT 'standard',
-
-        wealth_segment {text_type} DEFAULT 'average',
-
-        created_at {text_type} NOT NULL
-
-    );
-
-
-
-    CREATE TABLE IF NOT EXISTS transactions (
-
-        {pk_clause("id")},
-
-        sender_account {text_type} NOT NULL,
-
-        receiver_account {text_type} NOT NULL,
-
-        amount {real_type} NOT NULL,
-
-        transaction_type {text_type} NOT NULL,
-
-        currency {text_type} DEFAULT 'USD',
-
-        channel {text_type} DEFAULT 'online',
-
-        timestamp {text_type} NOT NULL,
-
-        status {text_type} NOT NULL,
-
-        risk_score {real_type} DEFAULT 0,
-
-        risk_level {text_type} DEFAULT 'normal',
-
-        rule_score {real_type} DEFAULT 0,
-
-        rule_level {text_type} DEFAULT 'normal',
-
-        rule_reason {long_text_type},
-
-        ai_risk_level {text_type},
-
-        ai_confidence {real_type} DEFAULT 0,
-
-        ai_reason {long_text_type},
-
-        description {long_text_type},
-
-        rules_triggered {long_text_type},
-
-        ctr_required INTEGER DEFAULT 0,
-
-        sar_required INTEGER DEFAULT 0,
-
-        destination_country {text_type} DEFAULT 'ZW',
-
-        screening_hits {long_text_type},
-
-        reviewed_by {text_type},
-
-        reviewed_at {text_type}
-
-    );
-
-
-
-    CREATE TABLE IF NOT EXISTS alerts (
-
-        {pk_clause("id")},
-
-        transaction_id INTEGER NOT NULL,
-
-        account_number {text_type} NOT NULL,
-
-        risk_score {real_type} NOT NULL,
-
-        risk_level {text_type} NOT NULL,
-
-        reason {long_text_type} NOT NULL,
-
-        rules_triggered {long_text_type},
-
-        status {text_type} DEFAULT 'open',
-
-        assigned_to {text_type},
-
-        case_notes {long_text_type},
-
-        resolved_at {text_type},
-
-        resolved_by {text_type},
-
-        timestamp {text_type} NOT NULL
-
-    );
-
-
-
-    CREATE TABLE IF NOT EXISTS sar_reports (
-
-        {pk_clause("id")},
-
-        alert_id INTEGER NOT NULL,
-
-        account_number {text_type} NOT NULL,
-
-        filed_by {text_type} NOT NULL,
-
-        narrative {long_text_type} NOT NULL,
-
-        status {text_type} DEFAULT 'draft',
-
-        filed_at {text_type},
-
-        reference_number {text_type},
-
-        created_at {text_type} NOT NULL
-
-    );
-
-
-
-    CREATE TABLE IF NOT EXISTS ctr_reports (
-
-        {pk_clause("id")},
-
-        transaction_id INTEGER NOT NULL,
-
-        account_number {text_type} NOT NULL,
-
-        amount {real_type} NOT NULL,
-
-        generated_by {text_type} NOT NULL,
-
-        status {text_type} DEFAULT 'pending',
-
-        filed_at {text_type},
-
-        created_at {text_type} NOT NULL
-
-    );
-
-
-
-    CREATE TABLE IF NOT EXISTS watchlist (
-
-        {pk_clause("id")},
-
-        name {text_type} NOT NULL,
-
-        id_number {text_type},
-
-        account_number {text_type},
-
-        list_type {text_type} NOT NULL,
-
-        reason {long_text_type},
-
-        added_by {text_type} NOT NULL,
-
-        added_at {text_type} NOT NULL
-
-    );
-
-
-
-    CREATE TABLE IF NOT EXISTS activity_log (
-
-        {pk_clause("id")},
-
-        actor {text_type} NOT NULL,
-
-        action {text_type} NOT NULL,
-
-        detail {long_text_type} NOT NULL,
-
-        ip_address {text_type},
-
-        timestamp {text_type} NOT NULL
-
-    );
-
-
-
-    CREATE TABLE IF NOT EXISTS behavioral_profiles (
-
-        account_number {text_type} PRIMARY KEY,
-
-        profile_data {long_text_type},
-
-        last_updated {text_type},
-
-        total_transactions INTEGER DEFAULT 0
-
-    );
-
-    """
-
-
-
-
-
-def init_db():
-
-    conn = connect_db()
-
-    conn.executescript(get_schema_sql())
-
-    # SQLite migration: add new columns to existing tables
-
-    if not is_postgres_database_url(app.config["DATABASE"]) and not is_mysql_database_url(app.config["DATABASE"]):
-
-        _migrate_sqlite(conn)
-
-    elif is_mysql_database_url(app.config["DATABASE"]):
-
-        _migrate_mysql(conn)
-
-    elif is_postgres_database_url(app.config["DATABASE"]):
-
-        _migrate_postgres(conn)
-
-    conn.commit()
-
-    conn.close()
-
-
-
-
-
-def _migrate_sqlite(conn):
-
-    """Add columns that may not exist in older DB files."""
-
-    migrations = {
-
-        "users": ["kyc_status TEXT DEFAULT 'pending'", "pep_flag INTEGER DEFAULT 0", "risk_rating TEXT DEFAULT 'standard'", "wealth_segment TEXT DEFAULT 'average'"],
-
-        "transactions": ["currency TEXT DEFAULT 'USD'", "channel TEXT DEFAULT 'online'",
-
-                         "rule_score REAL DEFAULT 0", "rule_level TEXT DEFAULT 'normal'",
-
-                         "rule_reason TEXT", "ai_risk_level TEXT", "ai_confidence REAL DEFAULT 0",
-
-                         "ai_reason TEXT",
-
-                         "rules_triggered TEXT DEFAULT '[]'", "ctr_required INTEGER DEFAULT 0",
-
-                         "sar_required INTEGER DEFAULT 0", "destination_country TEXT DEFAULT 'ZW'",
-
-                         "screening_hits TEXT", "reviewed_by TEXT", "reviewed_at TEXT"],
-
-        "alerts": ["rules_triggered TEXT DEFAULT '[]'", "status TEXT DEFAULT 'open'",
-
-                   "assigned_to TEXT", "case_notes TEXT", "resolved_at TEXT", "resolved_by TEXT"],
-
-        "behavioral_profiles": ["account_number TEXT PRIMARY KEY", "profile_data TEXT", "last_updated TEXT", "total_transactions INTEGER DEFAULT 0"],
-
-    }
-
-    for table, cols in migrations.items():
-
-        existing = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
-
-        for col_def in cols:
-
-            col_name = col_def.split()[0]
-
-            if col_name not in existing:
-
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
-
-
-
-
-
-def _migrate_mysql(conn):
-    """Widen older MySQL VARCHAR columns that store AML evidence JSON/text."""
-
-    column_migrations = {
-
-        "users": [
-            ("kyc_status", "VARCHAR(255) DEFAULT 'pending'"),
-            ("pep_flag", "INTEGER DEFAULT 0"),
-            ("risk_rating", "VARCHAR(255) DEFAULT 'standard'"),
-            ("wealth_segment", "VARCHAR(255) DEFAULT 'average'"),
-        ],
-        "transactions": [
-            ("currency", "VARCHAR(255) DEFAULT 'USD'"),
-            ("channel", "VARCHAR(255) DEFAULT 'online'"),
-            ("rule_score", "DOUBLE DEFAULT 0"),
-            ("rule_level", "VARCHAR(255) DEFAULT 'normal'"),
-            ("rule_reason", "LONGTEXT"),
-            ("ai_risk_level", "VARCHAR(255)"),
-            ("ai_confidence", "DOUBLE DEFAULT 0"),
-            ("ai_reason", "LONGTEXT"),
-            ("rules_triggered", "LONGTEXT DEFAULT '[]'"),
-            ("ctr_required", "INTEGER DEFAULT 0"),
-            ("sar_required", "INTEGER DEFAULT 0"),
-            ("destination_country", "VARCHAR(255) DEFAULT 'ZW'"),
-            ("screening_hits", "LONGTEXT"),
-            ("reviewed_by", "VARCHAR(255)"),
-            ("reviewed_at", "VARCHAR(255)"),
-            ("generated_label", "VARCHAR(50)"),
-        ],
-        "alerts": [
-            ("rules_triggered", "LONGTEXT DEFAULT '[]'"),
-            ("status", "VARCHAR(255) DEFAULT 'open'"),
-            ("assigned_to", "VARCHAR(255)"),
-            ("case_notes", "LONGTEXT"),
-            ("resolved_at", "VARCHAR(255)"),
-            ("resolved_by", "VARCHAR(255)"),
-        ],
-        "behavioral_profiles": [
-            ("account_number", "VARCHAR(255) PRIMARY KEY"),
-            ("profile_data", "LONGTEXT"),
-            ("last_updated", "VARCHAR(255)"),
-            ("total_transactions", "INTEGER DEFAULT 0"),
-        ],
-    }
-
-    for table, columns in column_migrations.items():
-        try:
-            existing = {
-                row["Field"]
-                for row in conn.execute(f"SHOW COLUMNS FROM {table}").fetchall()
-            }
-            for column_name, column_def in columns:
-                if column_name not in existing:
-                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {column_def}")
-        except Exception as e:
-            logging.error(f"Error adding columns to {table}: {e}")
-
-
-def _migrate_postgres(conn):
-    """Add columns for PostgreSQL databases."""
-    column_migrations = {
-        "users": [
-            ("kyc_status", "TEXT DEFAULT 'pending'"),
-            ("pep_flag", "INTEGER DEFAULT 0"),
-            ("risk_rating", "TEXT DEFAULT 'standard'"),
-            ("wealth_segment", "TEXT DEFAULT 'average'"),
-        ],
-        "transactions": [
-            ("currency", "TEXT DEFAULT 'USD'"),
-            ("channel", "TEXT DEFAULT 'online'"),
-            ("rule_score", "DOUBLE PRECISION DEFAULT 0"),
-            ("rule_level", "TEXT DEFAULT 'normal'"),
-            ("rule_reason", "TEXT"),
-            ("ai_risk_level", "TEXT"),
-            ("ai_confidence", "DOUBLE PRECISION DEFAULT 0"),
-            ("ai_reason", "TEXT"),
-            ("rules_triggered", "TEXT DEFAULT '[]'"),
-            ("ctr_required", "INTEGER DEFAULT 0"),
-            ("sar_required", "INTEGER DEFAULT 0"),
-            ("destination_country", "TEXT DEFAULT 'ZW'"),
-            ("screening_hits", "TEXT"),
-            ("reviewed_by", "TEXT"),
-            ("reviewed_at", "TEXT"),
-        ],
-        "alerts": [
-            ("rules_triggered", "TEXT DEFAULT '[]'"),
-            ("status", "TEXT DEFAULT 'open'"),
-            ("assigned_to", "TEXT"),
-            ("case_notes", "TEXT"),
-            ("resolved_at", "TEXT"),
-            ("resolved_by", "TEXT"),
-        ],
-        "behavioral_profiles": [
-            ("account_number", "TEXT PRIMARY KEY"),
-            ("profile_data", "TEXT"),
-            ("last_updated", "TEXT"),
-            ("total_transactions", "INTEGER DEFAULT 0"),
-        ],
-    }
-
-    for table, columns in column_migrations.items():
-        try:
-            # Check if table exists
-            table_exists = conn.execute(
-                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = %s)",
-                (table,)
-            ).fetchone()[0]
-            
-            if not table_exists:
-                # Create behavioral_profiles table if it doesn't exist
-                if table == "behavioral_profiles":
-                    conn.execute("""
-                        CREATE TABLE IF NOT EXISTS behavioral_profiles (
-                            account_number TEXT PRIMARY KEY,
-                            profile_data TEXT,
-                            last_updated TEXT,
-                            total_transactions INTEGER DEFAULT 0
-                        )
-                    """)
-                continue
-                
-            existing = {
-                row["column_name"]
-                for row in conn.execute(
-                    "SELECT column_name FROM information_schema.columns WHERE table_name = %s",
-                    (table,)
-                ).fetchall()
-            }
-            for column_name, column_def in columns:
-                if column_name not in existing:
-                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {column_def}")
-        except Exception as e:
-            logging.error(f"Error adding columns to {table}: {e}")
-
-
-
+        _ai_training_in_progress = True
+    
+    try:
+        rows = conn.execute(
+            """
+            SELECT t.id, t.sender_account, t.receiver_account, t.amount, t.transaction_type,
+                   t.timestamp, COALESCE(t.generated_label, t.risk_level) as risk_level, t.risk_score, t.channel,
+                   COALESCE(u.wealth_segment, 'average') AS wealth_segment
+            FROM transactions t
+            LEFT JOIN users u ON t.sender_account = u.account_number
+            WHERE description != 'Initiated' OR risk_score > 0
+            ORDER BY t.timestamp ASC, t.id ASC
+            """
+        ).fetchall()
+        model = train_ai_model(_ai_training_rows(rows))
+        if emit_events:
+            meta = get_model_metadata()
+            broadcast_event("ai_model", {
+                "trained": model is not None,
+                "training_rows": len(rows),
+                "version": meta.get("version", "unknown"),
+                "cross_val_f1": meta.get("cross_val_f1_weighted"),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        return model
+    finally:
+        with _ai_training_lock:
+            _ai_training_in_progress = False
+
+
+# ============================================================================
+# Flask Routes
+# ============================================================================
 
 
 def seed_demo_data():
-
-    conn = connect_db()
-
+    conn = connect_db(app.config["DATABASE"])
     now = datetime.now(timezone.utc).isoformat()
 
     default_users = [
@@ -2067,994 +1188,9 @@ def update_customer_risk_rating(db, account_number, action, current_risk):
     return new_risk
 
 
-
 def _generate_ctr_ref():
-
     ts = datetime.now(timezone.utc)
-
     return f"CTR-{ts.year}-{ts.strftime('%m%d')}-{random.randint(1000,9999)}"
-
-
-
-
-
-# ───────────────────────────────────────────────────── Transaction engine ──
-
-
-
-def _random_transaction_amount(tx_type):
-
-    if tx_type == "transfer":
-
-        return random.choice([25, 75, 150, 500, 950, 1500, 2500, 5000, 9000])
-
-    if tx_type == "withdraw":
-
-        return random.choice([20, 60, 120, 300, 1000, 3500, 10000])
-
-    return random.choice([50, 100, 250, 450, 1000, 3000, 9999, 10000])
-
-
-
-
-
-def _simulation_plan(count):
-    """Create a realistic class distribution for AML training data.
-
-    The majority of transactions should be ordinary activity, while the
-    remaining minority consists of suspicious and highly suspicious cases.
-    The split is tuned to support model training without overwhelming the
-    dataset with rare anomalies.
-    """
-    if count <= 0:
-        return []
-
-    normal_count = max(1, int(count * 0.60))
-    suspicious_count = max(0, int(count * 0.25))
-    super_count = count - normal_count - suspicious_count
-
-    if super_count < 0:
-        super_count = 0
-
-    labels = ["normal"] * normal_count + ["suspicious"] * suspicious_count + ["super_suspicious"] * super_count
-    random.shuffle(labels)
-    return labels
-
-
-
-
-
-def _simulation_timestamp(hour):
-
-    now = datetime.now(timezone.utc)
-
-    days_back = random.randint(1, 30)
-
-    candidate = now - timedelta(
-
-        days=days_back,
-
-        minutes=random.randint(0, 23 * 60 + 59),
-
-    )
-
-    return candidate.replace(
-
-        hour=hour,
-
-        minute=random.randint(0, 59),
-
-        second=random.randint(0, 59),
-
-        microsecond=0,
-
-    ).isoformat()
-
-
-
-
-
-NORMAL_TRANSACTION_SCENARIOS = [
-
-    {
-
-        "type": "deposit",
-
-        "amount": (850, 4200),
-
-        "channel": "ach",
-
-        "hours": list(range(8, 17)),
-
-        "description": "Payroll credit from registered employer",
-
-    },
-
-    {
-
-        "type": "withdraw",
-
-        "amount": (12, 180),
-
-        "channel": "card",
-
-        "hours": list(range(7, 22)),
-
-        "description": "Point-of-sale card purchase at local merchant",
-
-    },
-
-    {
-
-        "type": "withdraw",
-
-        "amount": (20, 500),
-
-        "channel": "atm",
-
-        "hours": list(range(6, 23)),
-
-        "description": "ATM cash withdrawal at bank terminal",
-
-    },
-
-    {
-
-        "type": "transfer",
-
-        "amount": (35, 950),
-
-        "channel": "mobile",
-
-        "hours": list(range(7, 22)),
-
-        "description": "Mobile transfer for household payment",
-
-    },
-
-    {
-
-        "type": "transfer",
-
-        "amount": (120, 1800),
-
-        "channel": "online",
-
-        "hours": list(range(8, 20)),
-
-        "description": "Online bill payment to regular beneficiary",
-
-    },
-
-]
-
-
-
-SUSPICIOUS_TRANSACTION_SCENARIOS = [
-
-    {
-
-        "type": "deposit",
-
-        "amount": (9200, 9900),
-
-        "channel": "branch",
-
-        "hours": list(range(9, 16)),
-
-        "description": "Cash deposit just below currency reporting threshold",
-
-        "reason": "Possible structuring: cash deposit below the CTR threshold",
-
-    },
-
-    {
-
-        "type": "transfer",
-
-        "amount": (1400, 6800),
-
-        "channel": "online",
-
-        "hours": [0, 1, 2, 3, 22, 23],
-
-        "description": "Unusual off-hours transfer to recently added beneficiary",
-
-        "reason": "Off-hours transfer pattern inconsistent with normal customer activity",
-
-    },
-
-    {
-
-        "type": "withdraw",
-
-        "amount": (1500, 6500),
-
-        "channel": "atm",
-
-        "hours": [0, 1, 2, 3, 4, 22, 23],
-
-        "description": "High-value ATM cash withdrawal outside normal banking hours",
-
-        "reason": "Large cash withdrawal during unusual hours",
-
-    },
-
-    {
-
-        "type": "transfer",
-
-        "amount": (2500, 7400),
-
-        "channel": "mobile",
-
-        "hours": list(range(6, 23)),
-
-        "description": "Multiple rapid mobile transfers to another customer account",
-
-        "reason": "Potential layering through repeated customer-to-customer transfers",
-
-    },
-
-    # Third-party payment scenarios
-
-    {
-
-        "type": "transfer",
-
-        "amount": (3000, 8500),
-
-        "channel": "online",
-
-        "hours": list(range(9, 17)),
-
-        "description": "Transfer to third-party account with no prior relationship",
-
-        "reason": "Third-party payment: transfer to unrelated beneficiary",
-
-    },
-
-    {
-
-        "type": "transfer",
-
-        "amount": (4500, 9500),
-
-        "channel": "mobile",
-
-        "hours": list(range(8, 20)),
-
-        "description": "Multiple payments to different third-party accounts",
-
-        "reason": "Third-party funneling: payments to multiple unrelated accounts",
-
-    },
-
-    # Shell company scenarios
-
-    {
-
-        "type": "transfer",
-
-        "amount": (8000, 18000),
-
-        "channel": "swift",
-
-        "hours": list(range(9, 16)),
-
-        "destination_country": "KY",
-
-        "description": "Transfer to offshore corporate account with no business purpose",
-
-        "reason": "Shell company: transfer to offshore entity with no legitimate business reason",
-
-    },
-
-    {
-
-        "type": "transfer",
-
-        "amount": (12000, 25000),
-
-        "channel": "swift",
-
-        "hours": list(range(9, 16)),
-
-        "destination_country": "BZ",
-
-        "description": "Large transfer to newly incorporated business entity",
-
-        "reason": "Shell company: transfer to recently created corporate entity",
-
-    },
-
-    # Trade-based money laundering scenarios
-
-    {
-
-        "type": "transfer",
-
-        "amount": (15000, 35000),
-
-        "channel": "swift",
-
-        "hours": list(range(9, 16)),
-
-        "destination_country": "CN",
-
-        "description": "Over-invoiced international trade payment",
-
-        "reason": "Trade-based laundering: payment amount inconsistent with typical trade values",
-
-    },
-
-    {
-
-        "type": "transfer",
-
-        "amount": (5000, 12000),
-
-        "channel": "online",
-
-        "hours": list(range(9, 16)),
-
-        "description": "Multiple small payments to same business entity",
-
-        "reason": "Trade-based structuring: breaking large payments into smaller amounts",
-
-    },
-
-    # Crypto/digital asset scenarios
-
-    {
-
-        "type": "transfer",
-
-        "amount": (3000, 8000),
-
-        "channel": "online",
-
-        "hours": [0, 1, 2, 3, 22, 23],
-
-        "description": "Transfer to cryptocurrency exchange platform",
-
-        "reason": "Crypto-related: transfer to digital asset exchange during off-hours",
-
-    },
-
-    {
-
-        "type": "transfer",
-
-        "amount": (7000, 15000),
-
-        "channel": "online",
-
-        "hours": list(range(9, 16)),
-
-        "description": "Rapid transfers between crypto exchange accounts",
-
-        "reason": "Crypto layering: rapid movement through digital asset platforms",
-
-    },
-
-]
-
-
-
-SUPER_SUSPICIOUS_TRANSACTION_SCENARIOS = [
-
-    {
-
-        "type": "deposit",
-
-        "amount": (10000, 28000),
-
-        "channel": "branch",
-
-        "hours": list(range(9, 16)),
-
-        "description": "Large cash deposit requiring currency transaction review",
-
-        "reason": "Cash transaction exceeds the CTR threshold and requires enhanced review",
-
-    },
-
-    {
-
-        "type": "transfer",
-
-        "amount": (12000, 52000),
-
-        "channel": "swift",
-
-        "hours": [0, 1, 2, 3, 23],
-
-        "destination_country": "IR",
-
-        "description": "High-value SWIFT transfer to high-risk jurisdiction",
-
-        "reason": "High-value off-hours transfer to FATF grey-list jurisdiction",
-
-    },
-
-    {
-
-        "type": "withdraw",
-
-        "amount": (10000, 24000),
-
-        "channel": "branch",
-
-        "hours": list(range(9, 16)),
-
-        "description": "Large over-the-counter cash withdrawal",
-
-        "reason": "Large cash withdrawal meets threshold for immediate compliance review",
-
-    },
-
-    # Enhanced structuring scenarios
-
-    {
-
-        "type": "deposit",
-
-        "amount": (4500, 4900),
-
-        "channel": "branch",
-
-        "hours": list(range(9, 16)),
-
-        "description": "Multiple cash deposits just below half CTR threshold",
-
-        "reason": "Smurfing pattern: multiple deposits below $5000 to avoid reporting",
-
-    },
-
-    {
-
-        "type": "deposit",
-
-        "amount": (2500, 2900),
-
-        "channel": "atm",
-
-        "hours": list(range(9, 16)),
-
-        "description": "Frequent small cash deposits via ATM",
-
-        "reason": "Structuring through small ATM deposits to avoid detection",
-
-    },
-
-    # Enhanced layering scenarios
-
-    {
-
-        "type": "transfer",
-
-        "amount": (8000, 15000),
-
-        "channel": "online",
-
-        "hours": list(range(9, 16)),
-
-        "description": "Rapid sequential transfers to multiple accounts",
-
-        "reason": "Layering: rapid movement of funds through multiple accounts",
-
-    },
-
-    {
-
-        "type": "transfer",
-
-        "amount": (3000, 7000),
-
-        "channel": "mobile",
-
-        "hours": list(range(9, 16)),
-
-        "description": "Circular transfer pattern between related accounts",
-
-        "reason": "Layering: circular transfers to obscure audit trail",
-
-    },
-
-    # Real estate scenarios
-
-    {
-
-        "type": "transfer",
-
-        "amount": (50000, 150000),
-
-        "channel": "swift",
-
-        "hours": list(range(9, 16)),
-
-        "destination_country": "AE",
-
-        "description": "Large transfer to real estate development company",
-
-        "reason": "Real estate laundering: large payment to property development entity",
-
-    },
-
-    {
-
-        "type": "transfer",
-
-        "amount": (25000, 75000),
-
-        "channel": "swift",
-
-        "hours": list(range(9, 16)),
-
-        "destination_country": "PA",
-
-        "description": "Multiple transfers to property holding companies",
-
-        "reason": "Real estate structuring: payments to multiple property holding entities",
-
-    },
-
-    # Casino/gambling scenarios
-
-    {
-
-        "type": "transfer",
-
-        "amount": (15000, 40000),
-
-        "channel": "online",
-
-        "hours": [0, 1, 2, 3, 22, 23],
-
-        "description": "Large transfer to online gambling platform",
-
-        "reason": "Casino laundering: transfer to gambling platform during off-hours",
-
-    },
-
-    {
-
-        "type": "transfer",
-
-        "amount": (8000, 20000),
-
-        "channel": "online",
-
-        "hours": list(range(9, 16)),
-
-        "description": "Rapid deposits and withdrawals from casino accounts",
-
-        "reason": "Casino layering: rapid movement through gambling platforms",
-
-    },
-
-    # Political corruption scenarios
-
-    {
-
-        "type": "transfer",
-
-        "amount": (20000, 50000),
-
-        "channel": "swift",
-
-        "hours": list(range(9, 16)),
-
-        "destination_country": "RU",
-
-        "description": "Transfer to entity linked to politically exposed person",
-
-        "reason": "PEP-related: transfer to entity associated with foreign official",
-
-    },
-
-    {
-
-        "type": "transfer",
-
-        "amount": (30000, 80000),
-
-        "channel": "swift",
-
-        "hours": [0, 1, 2, 3, 23],
-
-        "destination_country": "NG",
-
-        "description": "Off-hours transfer to offshore trust structure",
-
-        "reason": "Corruption: transfer to offshore trust structure during unusual hours",
-
-    },
-
-    # Terrorist financing scenarios
-
-    {
-
-        "type": "transfer",
-
-        "amount": (5000, 15000),
-
-        "channel": "mobile",
-
-        "hours": [0, 1, 2, 3, 22, 23],
-
-        "description": "Small rapid transfers to high-risk region accounts",
-
-        "reason": "Terrorist financing: small rapid transfers to high-risk jurisdictions",
-
-    },
-
-    {
-
-        "type": "transfer",
-
-        "amount": (10000, 25000),
-
-        "channel": "online",
-
-        "hours": list(range(9, 16)),
-
-        "description": "Transfer to charity organization in conflict zone",
-
-        "reason": "Terrorist financing: transfer to charitable entity in high-risk region",
-
-    },
-
-]
-
-
-
-def _scenario_amount(low, high, label):
-
-    amount = random.triangular(low, high, low + ((high - low) * 0.35))
-
-    if label == "normal":
-
-        return round(amount, 2)
-
-    if low >= 9000:
-
-        return round(amount / 50) * 50
-
-    return round(amount / 10) * 10
-
-
-
-
-
-def _simulation_segment_multiplier(segment, label):
-
-    segment = (segment or "average").lower()
-
-    multipliers = {
-
-        "low": {"normal": 0.6, "suspicious": 0.75, "super_suspicious": 0.9},
-
-        "average": {"normal": 1.0, "suspicious": 1.0, "super_suspicious": 1.0},
-
-        "high": {"normal": 1.5, "suspicious": 1.1, "super_suspicious": 1.2},
-
-        "ultra_high": {"normal": 2.0, "suspicious": 1.2, "super_suspicious": 1.3},
-
-    }
-
-    return multipliers.get(segment, multipliers["average"]).get(label, 1.0)
-
-
-def _simulation_transaction(label, users):
-    """Generate one transaction that reflects laundering typologies."""
-    if label == "normal":
-        scenario = random.choice(NORMAL_TRANSACTION_SCENARIOS)
-    elif label == "suspicious":
-        scenario = random.choice(SUSPICIOUS_TRANSACTION_SCENARIOS)
-    else:
-        scenario = random.choice(SUPER_SUSPICIOUS_TRANSACTION_SCENARIOS)
-
-    tx_type = scenario["type"]
-    sender = random.choice(users)
-    hour = random.choice(scenario["hours"])
-    dest_country = scenario.get("destination_country", "ZW")
-    description = scenario["description"]
-    scenario_reason = scenario.get("reason")
-
-    base_dt = _parse_timestamp(_simulation_timestamp(hour))
-
-    amount = round(
-        _scenario_amount(*scenario["amount"], label)
-        * _simulation_segment_multiplier(sender["wealth_segment"] or "average", label),
-        2,
-    )
-
-    if tx_type in ("withdraw", "transfer") and sender["balance"] is not None:
-        balance = float(sender["balance"] or 0)
-        if balance > 0 and amount > balance * 0.85:
-            amount = round(balance * random.uniform(0.35, 0.75), 2)
-            amount = max(amount, 1.0)
-
-    recipient = sender
-    if tx_type == "transfer" and len(users) > 1:
-        recipient = random.choice([user for user in users if user["id"] != sender["id"]])
-
-    timestamp = _simulation_timestamp(hour)
-    return [
-        (
-            sender, recipient, tx_type, amount, timestamp,
-            scenario["channel"], description, scenario_reason, dest_country,
-        )
-    ]
-
-
-
-def _simulation_reason(label, amount, tx_type, scenario_reason=None):
-
-    if label == "normal":
-
-        return "Routine customer activity consistent with known banking behaviour"
-
-    if label == "suspicious":
-
-        return f"{scenario_reason or 'Suspicious transaction pattern'} involving a {tx_type} of ${amount:,.2f}"
-
-    return f"{scenario_reason or 'High-risk AML pattern'} involving a {tx_type} of ${amount:,.2f}"
-
-
-
-
-
-def create_alert_if_needed(conn, transaction_id, account_number, risk_score, risk_level, reason, rules_json, timestamp):
-
-    existing = conn.execute("SELECT id FROM alerts WHERE transaction_id=?", (transaction_id,)).fetchone()
-
-    # Low scores are retained for trend analysis but do not interrupt analysts.
-    # Alerts require a material, explainable signal (score >= 40).
-    if existing is None and risk_level in ("suspicious", "high_risk", "critical"):
-
-        conn.execute(
-
-            """
-
-            INSERT INTO alerts (transaction_id, account_number, risk_score, risk_level, reason,
-
-                                rules_triggered, status, timestamp)
-
-            VALUES (?,?,?,?,?,?,?,?)
-
-            """,
-
-            (transaction_id, account_number, risk_score, risk_level, reason, rules_json, 'open', timestamp),
-
-        )
-
-        return get_last_insert_id(conn)
-
-    return None
-
-
-
-
-
-def _parse_timestamp(value):
-
-    try:
-
-        return datetime.fromisoformat(str(value))
-
-    except (TypeError, ValueError):
-
-        return datetime.now(timezone.utc)
-
-
-
-
-
-def _history_profile(amount, receiver_account, timestamp, history):
-    amounts = history.get("amounts", [])
-    recipients = history.get("recipients", set())
-    events = history.get("events", [])
-    prior_transactions = history.get("transactions", [])
-
-    amount = float(amount)
-    avg_amount = sum(amounts) / len(amounts) if amounts else 0.0
-    max_amount = max(amounts) if amounts else 0.0
-
-    current_time = _parse_timestamp(timestamp)
-    cutoff = current_time - timedelta(hours=24)
-    recent_amounts = [
-        float(event_amount)
-        for event_time, event_amount in events
-        if event_time >= cutoff
-    ]
-    volume_24h = sum(recent_amounts)
-
-    same_day_count = 0
-    same_day_total = 0.0
-    same_recipient_count = 0
-    rapid_transfer_count = 0
-
-    for prior_tx in prior_transactions:
-        try:
-            prior_time = _parse_timestamp(prior_tx.get("timestamp"))
-            if current_time.date() == prior_time.date():
-                same_day_count += 1
-                same_day_total += float(prior_tx.get("amount", 0) or 0)
-            if prior_time >= cutoff and prior_tx.get("receiver_account") == receiver_account:
-                same_recipient_count += 1
-            if 0 < (current_time - prior_time).total_seconds() <= 600:
-                rapid_transfer_count += 1
-        except (TypeError, ValueError):
-            continue
-
-    profile = dict(PROFILE_FEATURE_DEFAULTS)
-    profile.update({
-        "sender_avg_amount": avg_amount,
-        "sender_max_amount": max_amount,
-        "sender_tx_count": len(amounts),
-        "amount_to_sender_avg": amount / avg_amount if avg_amount > 0 else 1.0,
-        "amount_to_sender_max": amount / max_amount if max_amount > 0 else 1.0,
-        "sender_tx_count_24h": len(recent_amounts),
-        "sender_volume_24h": volume_24h,
-        "amount_to_sender_volume_24h": amount / volume_24h if volume_24h > 0 else 1.0,
-        "is_new_recipient": 0.0 if receiver_account in recipients else 1.0,
-        "same_day_count": same_day_count,
-        "same_day_total": same_day_total,
-        "same_recipient_count": same_recipient_count,
-        "rapid_transfer_count": rapid_transfer_count,
-    })
-
-    return profile
-
-
-
-
-
-def _ai_profile_for_transaction(conn, transaction_id, sender_account, receiver_account, amount, timestamp):
-
-    cutoff = (_parse_timestamp(timestamp) - timedelta(hours=24)).isoformat()
-    tx_date = _parse_timestamp(timestamp).date()
-
-    prior = conn.execute(
-
-        """
-
-        SELECT
-
-            COUNT(*) AS tx_count,
-
-            COALESCE(AVG(amount), 0) AS avg_amount,
-
-            COALESCE(MAX(amount), 0) AS max_amount,
-
-            COALESCE(u.wealth_segment, 'average') AS wealth_segment
-
-        FROM transactions t
-
-        LEFT JOIN users u ON t.sender_account = u.account_number
-
-        WHERE sender_account=? AND (? IS NULL OR t.id<>?) AND timestamp<?
-
-        """,
-
-        (sender_account, transaction_id, transaction_id, timestamp),
-
-    ).fetchone()
-
-    recent = conn.execute(
-
-        """
-
-        SELECT COUNT(*) AS tx_count, COALESCE(SUM(amount), 0) AS volume
-
-        FROM transactions t
-
-        WHERE sender_account=? AND (? IS NULL OR t.id<>?) AND timestamp>=? AND timestamp<?
-
-        """,
-
-        (sender_account, transaction_id, transaction_id, cutoff, timestamp),
-
-    ).fetchone()
-
-    recipient_seen = conn.execute(
-
-        """
-
-        SELECT id FROM transactions t
-
-        WHERE sender_account=? AND receiver_account=? AND (? IS NULL OR t.id<>?) AND timestamp<?
-
-        LIMIT 1
-
-        """,
-
-        (sender_account, receiver_account, transaction_id, transaction_id, timestamp),
-
-    ).fetchone()
-
-    # New structuring and layering features
-    same_day_txs = conn.execute(
-        """
-        SELECT COUNT(*) AS count, COALESCE(SUM(amount), 0) AS total
-        FROM transactions t
-        WHERE sender_account=? AND (? IS NULL OR t.id<>?) AND DATE(timestamp)=DATE(?)
-        """,
-        (sender_account, transaction_id, transaction_id, timestamp),
-    ).fetchone()
-
-    same_recipient_24h = conn.execute(
-        """
-        SELECT COUNT(*) AS count
-        FROM transactions t
-        WHERE sender_account=? AND receiver_account=? AND (? IS NULL OR t.id<>?) AND timestamp>=? AND timestamp<?
-        """,
-        (sender_account, receiver_account, transaction_id, transaction_id, cutoff, timestamp),
-    ).fetchone()
-
-    rapid_transfers = conn.execute(
-        """
-        SELECT COUNT(*) AS count
-        FROM transactions t
-        WHERE sender_account=? AND (? IS NULL OR t.id<>?) 
-        AND timestamp>=? AND timestamp<?
-        """,
-        (sender_account, transaction_id, transaction_id,
-         (_parse_timestamp(timestamp) - timedelta(minutes=10)).isoformat(),
-         timestamp),
-    ).fetchone()
-
-    avg_amount = float(prior["avg_amount"] if prior else 0)
-
-    max_amount = float(prior["max_amount"] if prior else 0)
-
-    tx_count = int(prior["tx_count"] if prior else 0)
-
-    volume_24h = float(recent["volume"] if recent else 0)
-
-    amount = float(amount)
-
-
-
-    profile = dict(PROFILE_FEATURE_DEFAULTS)
-
-    profile.update({
-
-        "sender_avg_amount": avg_amount,
-
-        "sender_max_amount": max_amount,
-
-        "sender_tx_count": tx_count,
-
-        "amount_to_sender_avg": amount / avg_amount if avg_amount > 0 else 1.0,
-
-        "amount_to_sender_max": amount / max_amount if max_amount > 0 else 1.0,
-
-        "sender_tx_count_24h": int(recent["tx_count"] if recent else 0),
-
-        "sender_volume_24h": volume_24h,
-
-        "amount_to_sender_volume_24h": amount / volume_24h if volume_24h > 0 else 1.0,
-
-        "is_new_recipient": 0.0 if recipient_seen else 1.0,
-
-        "wealth_segment": prior["wealth_segment"] if prior and prior["wealth_segment"] else "average",
-
-        # New structuring and layering features
-        "same_day_count": int(same_day_txs["count"] if same_day_txs else 0),
-        "same_day_total": float(same_day_txs["total"] if same_day_txs else 0),
-        "same_recipient_count": int(same_recipient_24h["count"] if same_recipient_24h else 0),
-        "rapid_transfer_count": int(rapid_transfers["count"] if rapid_transfers else 0),
-
-    })
-
-    return profile
-
-
-
 
 
 def _ai_training_rows(rows):

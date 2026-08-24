@@ -147,17 +147,34 @@
           body: formData
         });
         
+        console.log('Server response status:', response.status);
+        
         if (response.ok) {
           // Send OTP via EmailJS
           const email = document.getElementById('email').value;
-          await emailjs.send('service_0ad6822', 'template_gtrldtr', {
-            to_email: email,
-            otp: otp,
-            to_name: document.getElementById('username').value
-          });
+          console.log('Sending EmailJS to:', email, 'with OTP:', otp);
           
-          // Redirect to OTP step
-          window.location.href = `/register?otp_step=true&email=${encodeURIComponent(email)}`;
+          try {
+            const emailResult = await emailjs.send('service_0ad6822', 'template_gtrldtr', {
+              to_email: email,
+              otp: otp,
+              to_name: document.getElementById('username').value
+            });
+            console.log('EmailJS result:', emailResult);
+            
+            // Redirect to OTP step
+            window.location.href = `/register?otp_step=true&email=${encodeURIComponent(email)}`;
+          } catch (emailError) {
+            console.error('EmailJS error:', emailError);
+            alert('EmailJS failed: ' + emailError.message + '. Falling back to server email.');
+            // Fallback: redirect anyway, server will handle SMTP
+            window.location.href = `/register?otp_step=true&email=${encodeURIComponent(email)}`;
+          }
+        } else {
+          console.error('Server response not ok:', response.status);
+          const errorText = await response.text();
+          console.error('Server error:', errorText);
+          alert('Server error: ' + errorText);
         }
       } catch (error) {
         console.error('Error:', error);
