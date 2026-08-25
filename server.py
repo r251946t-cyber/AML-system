@@ -995,6 +995,32 @@ def broadcast_stats(conn=None):
     broadcast_event("stats", _stats_payload(conn))
 
 
+def send_otp_email_async(email, otp_code):
+    """Send OTP email using SMTP."""
+    subject = "StanPro Bank - Verification Code"
+    body = f"""
+Your verification code is: {otp_code}
+
+This code will expire in 10 minutes.
+
+If you did not request this code, please ignore this email.
+
+StanPro Bank AML Intelligence Platform
+"""
+    html_body = f"""
+<html>
+<body>
+    <h2>StanPro Bank - Verification Code</h2>
+    <p>Your verification code is: <strong>{otp_code}</strong></p>
+    <p>This code will expire in 10 minutes.</p>
+    <p>If you did not request this code, please ignore this email.</p>
+    <p><em>StanPro Bank AML Intelligence Platform</em></p>
+</body>
+</html>
+"""
+    return send_email(email, subject, body, html_body)
+
+
 
 
 
@@ -2326,15 +2352,8 @@ def register():
 
 
 
-        # Check if using EmailJS (client-generated OTP) or SMTP (server-generated OTP)
-        client_otp = request.form.get('client_otp')
-        
-        if client_otp:
-            # EmailJS flow: use client-generated OTP
-            otp_code = client_otp
-        else:
-            # SMTP flow: generate server-side OTP
-            otp_code = f"{random.randint(100000, 999999)}"
+        # Generate server-side OTP
+        otp_code = f"{random.randint(100000, 999999)}"
 
         session["pending_registration"] = {
 
@@ -2346,25 +2365,20 @@ def register():
 
         }
 
-        # Only send via SMTP if not using EmailJS
-        if not client_otp:
-            try:
+        # Send OTP via SMTP
+        try:
 
-                send_otp_email_async(email, otp_code)
+            send_otp_email_async(email, otp_code)
 
-            except Exception as e:
+        except Exception as e:
 
-                session.pop("pending_registration", None)
+            session.pop("pending_registration", None)
 
-                app.logger.error(f"OTP send failed: {str(e)}")
+            app.logger.error(f"OTP send failed: {str(e)}")
 
-                flash("Could not send verification code. Please check the email address or try again later.")
+            return jsonify({"success": False, "error": "Could not send verification code. Please check the email address or try again later."})
 
-                return render_template("register.html")
-
-        flash(f"Verification code sent to {email}.")
-
-        return render_template("register.html", otp_step=True, email=email)
+        return jsonify({"success": True, "email": email})
 
     return render_template("register.html")
 

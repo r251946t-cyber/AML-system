@@ -44,11 +44,7 @@
     </form>
   </div>
 </section>
-<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js"></script>
 <script>
-  // Initialize EmailJS
-  emailjs.init("KbIP2wWUxWsAc_TA8");
-
   document.querySelectorAll('input[name="id_number"]').forEach((input) => {
     input.addEventListener('input', () => {
       const value = input.value.replace(/[^0-9a-z]/gi, '').toUpperCase().slice(0, 12);
@@ -113,7 +109,7 @@
     });
   }
 
-  // EmailJS integration for OTP
+  // Server-side OTP sending
   const registerForm = document.getElementById('registerForm');
   const sendOtpBtn = document.getElementById('sendOtpBtn');
   const isOtpStep = registerForm ? registerForm.dataset.otpStep === 'true' : false;
@@ -134,12 +130,8 @@
         return;
       }
       
-      // Generate OTP client-side (in production, this should be server-side)
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      
-      // Store OTP in session via server request
+      // Submit form to server - server will handle OTP generation and email sending
       const formData = new FormData(this);
-      formData.append('client_otp', otp);
       
       try {
         const response = await fetch('/register', {
@@ -147,33 +139,15 @@
           body: formData
         });
         
-        console.log('Server response status:', response.status);
-        
         if (response.ok) {
-          // Send OTP via EmailJS
-          const email = document.getElementById('email').value;
-          console.log('Sending EmailJS to:', email, 'with OTP:', otp);
-          
-          try {
-            const emailResult = await emailjs.send('service_0ad6822', 'template_gtrldtr', {
-              to_email: email,
-              otp: otp,
-              to_name: document.getElementById('username').value
-            });
-            console.log('EmailJS result:', emailResult);
-            
-            // Redirect to OTP step
-            window.location.href = `/register?otp_step=true&email=${encodeURIComponent(email)}`;
-          } catch (emailError) {
-            console.error('EmailJS error:', emailError);
-            alert('EmailJS failed: ' + emailError.message + '. Falling back to server email.');
-            // Fallback: redirect anyway, server will handle SMTP
-            window.location.href = `/register?otp_step=true&email=${encodeURIComponent(email)}`;
+          const result = await response.json();
+          if (result.success) {
+            window.location.href = `/register?otp_step=true&email=${encodeURIComponent(result.email)}`;
+          } else {
+            alert(result.error || 'Registration failed. Please try again.');
           }
         } else {
-          console.error('Server response not ok:', response.status);
           const errorText = await response.text();
-          console.error('Server error:', errorText);
           alert('Server error: ' + errorText);
         }
       } catch (error) {
