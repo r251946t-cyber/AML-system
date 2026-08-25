@@ -173,11 +173,11 @@ from utils import (
     serialize_value,
     serialize_row,
     serialize_rows,
-    _json_safe,
     request_page,
     _user_balance_payload,
     _transaction_payload,
     _stats_payload,
+    send_email,
 )
 from users import (
     validate_id_number,

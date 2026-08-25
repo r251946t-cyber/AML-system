@@ -6,6 +6,7 @@ This module provides utility functions for the AML system including:
 - Event broadcasting helpers
 - Pagination helpers
 - JSON safe conversion
+- SMTP email sending
 
 Functions:
     - serialize_value: Convert value to JSON-serializable format
@@ -14,10 +15,15 @@ Functions:
     - _json_safe: Convert value to JSON-safe format
     - request_page: Get page number from request args
     - _user_balance_payload: Create user balance payload for broadcasting
+    - send_email: Send email using SMTP configuration from environment
 """
 
+import os
+import smtplib
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
+from email.message import EmailMessage
 from flask import request
 
 
@@ -175,3 +181,56 @@ def _stats_payload(conn):
         "open_alerts": open_alerts,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def send_email(to_email, subject, body, html_body=None):
+    """
+    Send email using SMTP configuration from environment variables.
+    
+    Reads SMTP configuration from:
+    - SMTP_EMAIL: Sender email address
+    - SMTP_PASSWORD: SMTP password or app-specific password
+    - SMTP_SERVER: SMTP server hostname (default: smtp.gmail.com)
+    - SMTP_PORT: SMTP port (default: 587 for TLS)
+    
+    Args:
+        to_email: Recipient email address
+        subject: Email subject
+        body: Plain text email body
+        html_body: Optional HTML email body
+    
+    Returns:
+        bool: True if email sent successfully, False otherwise
+    """
+    smtp_email = os.environ.get("SMTP_EMAIL")
+    smtp_password = os.environ.get("SMTP_PASSWORD")
+    smtp_server = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    
+    # Check if SMTP is configured
+    if not smtp_email or not smtp_password:
+        logging.warning("SMTP not configured: SMTP_EMAIL or SMTP_PASSWORD not set")
+        return False
+    
+    try:
+        msg = EmailMessage()
+        msg["From"] = smtp_email
+        msg["To"] = to_email
+        msg["Subject"] = subject
+        msg.set_content(body)
+        
+        if html_body:
+            msg.add_alternative(html_body, subtype="html")
+        
+        # Connect to SMTP server and send
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()  # Secure the connection
+            server.login(smtp_email, smtp_password)
+            server.send_message(msg)
+        
+        logging.info(f"Email sent successfully to {to_email}")
+        return True
+        
+    except Exception as e:
+        logging.error(f"Failed to send email to {to_email}: {e}")
+        return False
