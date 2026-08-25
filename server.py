@@ -2376,9 +2376,13 @@ def register():
 
             app.logger.error(f"OTP send failed: {str(e)}")
 
-            return jsonify({"success": False, "error": "Could not send verification code. Please check the email address or try again later."})
+            flash("Could not send verification code. Please check the email address or try again later.")
 
-        return jsonify({"success": True, "email": email})
+            return render_template("register.html")
+
+        flash(f"Verification code sent to {email}.")
+
+        return render_template("register.html", otp_step=True, email=email)
 
     return render_template("register.html")
 
