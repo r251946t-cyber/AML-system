@@ -71,6 +71,9 @@ from collections import defaultdict
 
 from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
+
 # Flag to prevent concurrent AI training
 _ai_training_in_progress = False
 _ai_training_lock = threading.Lock()
@@ -1018,7 +1021,15 @@ StanPro Bank AML Intelligence Platform
 </body>
 </html>
 """
-    return send_email(email, subject, body, html_body)
+    result = send_email(email, subject, body, html_body)
+    
+    # Always log OTP to console for debugging (fallback)
+    if result:
+        app.logger.info(f"OTP sent via email to {email}")
+    else:
+        app.logger.warning(f"OTP email failed to send to {email}. OTP for testing: {otp_code}")
+    
+    return result
 
 
 
