@@ -208,10 +208,20 @@ def send_email(to_email, subject, body, html_body=None):
     smtp_port = int(os.environ.get("SMTP_PORT", "587"))
     
     # Log SMTP configuration (without password)
+    print(f"\n{'='*60}")
+    print(f"SMTP Email Function Called")
+    print(f"  To: {to_email}")
+    print(f"  SMTP_EMAIL: {smtp_email}")
+    print(f"  SMTP_PASSWORD: {'SET' if smtp_password else 'NOT SET'}")
+    print(f"  SMTP_SERVER: {smtp_server}")
+    print(f"  SMTP_PORT: {smtp_port}")
+    print(f"{'='*60}\n")
+    
     logging.info(f"SMTP Configuration - Email: {smtp_email}, Server: {smtp_server}, Port: {smtp_port}")
     
     # Check if SMTP is configured
     if not smtp_email or not smtp_password:
+        print("ERROR: SMTP not configured - missing credentials")
         logging.error(f"SMTP not configured: SMTP_EMAIL={'SET' if smtp_email else 'NOT SET'}, SMTP_PASSWORD={'SET' if smtp_password else 'NOT SET'}")
         return False
     
@@ -225,22 +235,29 @@ def send_email(to_email, subject, body, html_body=None):
         if html_body:
             msg.add_alternative(html_body, subtype="html")
         
+        print("Attempting to connect to SMTP server...")
         logging.info(f"Attempting to connect to SMTP server {smtp_server}:{smtp_port}")
         
         # Connect to SMTP server and send
         with smtplib.SMTP(smtp_server, smtp_port) as server:
+            print("Connected to SMTP server, starting TLS...")
             logging.info(f"Connected to SMTP server, starting TLS")
             server.starttls()  # Secure the connection
+            print("TLS started, attempting login...")
             logging.info(f"TLS started, attempting login")
             server.login(smtp_email, smtp_password)
+            print("Login successful, sending email...")
             logging.info(f"Login successful, sending email to {to_email}")
             server.send_message(msg)
         
+        print(f"✓ Email sent successfully to {to_email}")
         logging.info(f"Email sent successfully to {to_email}")
         return True
         
     except Exception as e:
+        print(f"✗ Failed to send email: {type(e).__name__}: {e}")
         logging.error(f"Failed to send email to {to_email}: {type(e).__name__}: {e}")
         import traceback
+        print(f"Full traceback:\n{traceback.format_exc()}")
         logging.error(f"Full traceback: {traceback.format_exc()}")
         return False

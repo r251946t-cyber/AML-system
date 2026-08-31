@@ -2200,14 +2200,14 @@ def send_otp_email(recipient_email, otp):
 def send_otp_email_async(recipient_email, otp):
 
     def _send():
+        with app.app_context():
+            try:
 
-        try:
+                send_otp_email(recipient_email, otp)
 
-            send_otp_email(recipient_email, otp)
+            except Exception as e:
 
-        except Exception as e:
-
-            app.logger.error(f"Failed to send OTP email to {recipient_email}: {str(e)}")
+                app.logger.error(f"Failed to send OTP email to {recipient_email}: {str(e)}")
 
     thread = threading.Thread(target=_send, daemon=True)
 
@@ -2365,6 +2365,11 @@ def register():
 
         # Generate server-side OTP
         otp_code = f"{random.randint(100000, 999999)}"
+        
+        # Print OTP to console for debugging
+        print(f"\n{'='*60}")
+        print(f"OTP GENERATED FOR {email}: {otp_code}")
+        print(f"{'='*60}\n")
 
         session["pending_registration"] = {
 
@@ -2377,15 +2382,18 @@ def register():
         }
 
         # Send OTP via SMTP
+        print(f"Attempting to send OTP email to {email}...")
         try:
 
-            send_otp_email_async(email, otp_code)
+            result = send_otp_email_async(email, otp_code)
+            print(f"Email send result: {result}")
 
         except Exception as e:
 
             session.pop("pending_registration", None)
 
             app.logger.error(f"OTP send failed: {str(e)}")
+            print(f"ERROR sending OTP: {e}")
 
             flash("Could not send verification code. Please check the email address or try again later.")
 
