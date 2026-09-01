@@ -29,7 +29,7 @@
       <input id="password" type="password" name="password" autocomplete="current-password" required placeholder="Password">
       <div class="auth-actions">
         <button type="submit">Sign In</button>
-        <a class="text-link" href="#">Forgot password?</a>
+        <a class="text-link" href="{{ url_for('forgot_password') }}">Forgot password?</a>
       </div>
     </form>
     <div class="auth-footer">

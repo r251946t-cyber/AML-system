@@ -17,6 +17,7 @@ Functions:
 
 import random
 from datetime import datetime, timezone
+from utils import get_last_insert_id
 
 
 def create_alert_if_needed(conn, transaction_id, account_number, risk_score, risk_level, reason, rules_json, timestamp):
@@ -53,18 +54,7 @@ def create_alert_if_needed(conn, transaction_id, account_number, risk_score, ris
     return None
 
 
-def get_last_insert_id(conn):
-    """
-    Get the last inserted row ID from the database connection.
-    
-    Args:
-        conn: Database connection
-    
-    Returns:
-        Last inserted row ID
-    """
-    cursor = conn.execute("SELECT last_insert_rowid()")
-    return cursor.fetchone()[0]
+
 
 
 def update_customer_risk_rating(db, account_number, action, current_risk):

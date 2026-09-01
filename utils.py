@@ -1,5 +1,4 @@
-"""
-utils.py — Utility Functions Module
+"""utils.py — Utility Functions Module
 
 This module provides utility functions for the AML system including:
 - Data serialization for JSON responses
@@ -7,6 +6,7 @@ This module provides utility functions for the AML system including:
 - Pagination helpers
 - JSON safe conversion
 - SMTP email sending
+- Database compatibility helpers
 
 Functions:
     - serialize_value: Convert value to JSON-serializable format
@@ -16,6 +16,7 @@ Functions:
     - request_page: Get page number from request args
     - _user_balance_payload: Create user balance payload for broadcasting
     - send_email: Send email using SMTP configuration from environment
+    - get_last_insert_id: Get last inserted row ID (database-agnostic)
 """
 
 import os
@@ -25,6 +26,40 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from email.message import EmailMessage
 from flask import request
+
+
+def get_last_insert_id(conn, database_url=None):
+    """
+    Get the last inserted row ID from the database connection.
+    Works with SQLite, MySQL, and PostgreSQL.
+    
+    Args:
+        conn: Database connection
+        database_url: Optional database URL to determine database type
+    
+    Returns:
+        Last inserted row ID
+    """
+    # Try to get database URL from Flask app config if not provided
+    if not database_url:
+        try:
+            from flask import current_app
+            database_url = current_app.config.get("DATABASE_URL") or current_app.config.get("DATABASE")
+        except (RuntimeError, ImportError):
+            database_url = os.environ.get("DATABASE_URL")
+    
+    if database_url:
+        # Determine database type from URL
+        from database import is_postgres_database_url, is_mysql_database_url
+        
+        if is_postgres_database_url(database_url):
+            return conn.execute("SELECT LASTVAL() as id").fetchone()["id"]
+        if is_mysql_database_url(database_url):
+            return conn.execute("SELECT LAST_INSERT_ID() as id").fetchone()["id"]
+    
+    # Default to SQLite
+    cursor = conn.execute("SELECT last_insert_rowid()")
+    return cursor.fetchone()[0]
 
 
 def serialize_value(value):

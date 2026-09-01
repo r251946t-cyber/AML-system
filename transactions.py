@@ -139,12 +139,12 @@ def _combine_rule_ai_risk(rule_score, rule_level, rule_reason, triggered_rules, 
             f"with {ai_confidence:.0%} confidence."
         )
 
-    if ai_level and ai_confidence >= 0.55:
+    if ai_level and ai_confidence >= 0.50:
         ai_score = AI_RISK_SCORES.get(ai_level, rule_score)
         ai_rank = RISK_RANK.get(ai_level, 0)
 
         if not mandatory:
-            ai_weight = min(0.85, max(0.60, ai_confidence))
+            ai_weight = min(0.85, max(0.65, ai_confidence))
             rule_weight = 1 - ai_weight
             blended_score = round((ai_score * ai_weight) + (rule_score * rule_weight))
 

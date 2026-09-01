@@ -288,7 +288,8 @@ def test_transaction_processing_emits_live_events(client):
             ("ACC1001", "ACC1002", 1500, "transfer", "2026-06-13T00:00:00+00:00", "Completed", 0, "normal", "Test transaction"),
         )
         conn.commit()
-        transaction_id = conn.execute("SELECT last_insert_rowid() as id").fetchone()["id"]
+        from utils import get_last_insert_id
+        transaction_id = get_last_insert_id(conn)
 
         aml_app.process_transaction_event(
             conn,

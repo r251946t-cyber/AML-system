@@ -19,6 +19,7 @@ Functions:
 import re
 import os
 from werkzeug.security import generate_password_hash
+from utils import get_last_insert_id
 
 
 ID_NUMBER_PATTERN = re.compile(r"^\d{2}-\d{6,7}[A-Z]\d{2}$")
@@ -113,8 +114,7 @@ def create_user(conn, username, password, account_number, id_number=None, email=
     )
     
     # Get last insert ID
-    cursor = conn.execute("SELECT last_insert_rowid()")
-    return cursor.fetchone()[0]
+    return get_last_insert_id(conn)
 
 
 def get_user_by_account_number(conn, account_number):

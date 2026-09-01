@@ -14,6 +14,7 @@ Functions:
 """
 
 from datetime import datetime, timezone
+from utils import get_last_insert_id
 from alerts import _generate_sar_ref, _generate_ctr_ref
 
 
@@ -42,8 +43,7 @@ def create_sar_report(conn, transaction_id, account_number, filing_reason, filed
     )
     
     # Get last insert ID
-    cursor = conn.execute("SELECT last_insert_rowid()")
-    return cursor.fetchone()[0]
+    return get_last_insert_id(conn)
 
 
 def create_ctr_report(conn, account_number, total_amount, transaction_count, filing_date, filed_by):
@@ -72,8 +72,7 @@ def create_ctr_report(conn, account_number, total_amount, transaction_count, fil
     )
     
     # Get last insert ID
-    cursor = conn.execute("SELECT last_insert_rowid()")
-    return cursor.fetchone()[0]
+    return get_last_insert_id(conn)
 
 
 def get_sar_reports(conn, limit=100):

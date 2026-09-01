@@ -52,16 +52,16 @@ def _random_transaction_amount(tx_type):
 def _simulation_plan(count):
     """Create a realistic class distribution for AML training data.
 
-    The majority of transactions should be ordinary activity, while the
-    remaining minority consists of suspicious and highly suspicious cases.
+    The majority of transactions should be ordinary activity (at least 70%),
+    while the remaining minority consists of suspicious and highly suspicious cases.
     The split is tuned to support model training without overwhelming the
     dataset with rare anomalies.
     """
     if count <= 0:
         return []
 
-    normal_count = max(1, int(count * 0.60))
-    suspicious_count = max(0, int(count * 0.25))
+    normal_count = max(1, int(count * 0.70))
+    suspicious_count = max(0, int(count * 0.20))
     super_count = count - normal_count - suspicious_count
 
     if super_count < 0:

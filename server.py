@@ -2161,7 +2161,7 @@ def dashboard_redirect():
 def send_otp_email(recipient_email, otp):
 
     if app.config.get("TESTING"):
-
+        print(f"[TESTING MODE] Would send OTP to {recipient_email}: {otp}")
         return True
 
     sender_email = os.environ.get("SMTP_EMAIL")
@@ -2173,8 +2173,11 @@ def send_otp_email(recipient_email, otp):
     smtp_port = int(os.environ.get("SMTP_PORT", "587"))
 
     if not sender_email or not sender_password:
-
+        print(f"ERROR: SMTP credentials not configured")
         raise ValueError("SMTP credentials not configured")
+
+    print(f"[EMAIL] Preparing to send OTP to {recipient_email}")
+    print(f"[EMAIL] From: {sender_email}, Server: {smtp_server}:{smtp_port}")
 
     msg = EmailMessage()
 
@@ -2186,13 +2189,22 @@ def send_otp_email(recipient_email, otp):
 
     msg.set_content(f"Your StanPro Bank verification code is: {otp}\n\nThis code expires in 10 minutes.")
 
-    with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as server:
+    try:
+        print(f"[EMAIL] Connecting to SMTP server...")
+        with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as server:
+            print(f"[EMAIL] Connected, starting TLS...")
+            server.starttls()
+            print(f"[EMAIL] TLS started, logging in...")
+            server.login(sender_email, sender_password)
+            print(f"[EMAIL] Login successful, sending message...")
+            server.send_message(msg)
+            print(f"[EMAIL] ✓ Message sent successfully")
 
-        server.starttls(timeout=30)
-
-        server.login(sender_email, sender_password)
-
-        server.send_message(msg)
+    except Exception as e:
+        print(f"[EMAIL] ✗ Error during send: {type(e).__name__}: {e}")
+        import traceback
+        print(f"[EMAIL] Traceback: {traceback.format_exc()}")
+        raise
 
     return True
 
@@ -2202,16 +2214,22 @@ def send_otp_email_async(recipient_email, otp):
     def _send():
         with app.app_context():
             try:
-
+                print(f"[ASYNC EMAIL] Starting to send OTP to {recipient_email}...")
                 send_otp_email(recipient_email, otp)
+                print(f"[ASYNC EMAIL] ✓ OTP email sent successfully to {recipient_email}")
 
             except Exception as e:
+                import traceback
+                error_msg = f"Failed to send OTP email to {recipient_email}: {str(e)}"
+                print(f"[ASYNC EMAIL] ✗ {error_msg}")
+                print(f"[ASYNC EMAIL] Traceback: {traceback.format_exc()}")
+                app.logger.error(f"{error_msg}\n{traceback.format_exc()}")
 
-                app.logger.error(f"Failed to send OTP email to {recipient_email}: {str(e)}")
-
-    thread = threading.Thread(target=_send, daemon=True)
+    thread = threading.Thread(target=_send, daemon=False)  # Changed to daemon=False for better visibility
 
     thread.start()
+    # Give thread a small window to start execution
+    time.sleep(0.1)
 
     return True
 
@@ -2512,6 +2530,107 @@ def logout():
     flash("You have been signed out.")
 
     return redirect(url_for("login"))
+
+
+@app.route("/forgot-password", methods=["GET", "POST"])
+
+def forgot_password():
+
+    if request.method == "POST":
+
+        email = request.form.get("email", "").strip().lower()
+
+        if not email:
+
+            flash("Email is required.")
+
+            return render_template("forgot_password.html")
+
+        user = get_user_by_email(email)
+
+        if user:
+
+            # Generate reset token
+            reset_token = f"{random.randint(100000, 999999)}"
+            
+            # Store token in database (using a simple approach - in production, use a dedicated table)
+            session["password_reset"] = {
+                "user_id": user["id"],
+                "token": reset_token,
+                "expires_at": time.time() + 600  # 10 minutes
+            }
+            
+            # Send email with reset token
+            try:
+                send_otp_email_async(email, reset_token)
+                flash(f"Password reset code sent to {email}.")
+                return redirect(url_for("reset_password"))
+            except Exception as e:
+                app.logger.error(f"Failed to send reset email: {e}")
+                flash("Could not send reset code. Please try again later.")
+                return render_template("forgot_password.html")
+        
+        # Always show same message for security (don't reveal if email exists)
+        flash("If an account exists with this email, a reset code will be sent.")
+        return render_template("forgot_password.html")
+
+    return render_template("forgot_password.html")
+
+
+@app.route("/reset-password", methods=["GET", "POST"])
+
+def reset_password():
+
+    reset_data = session.get("password_reset")
+    
+    if not reset_data:
+        flash("Password reset session expired. Please start again.")
+        return redirect(url_for("forgot_password"))
+    
+    if time.time() > reset_data.get("expires_at", 0):
+        session.pop("password_reset", None)
+        flash("Reset code expired. Please request a new one.")
+        return redirect(url_for("forgot_password"))
+
+    if request.method == "POST":
+        reset_code = request.form.get("reset_code", "").strip()
+        new_password = request.form.get("new_password", "")
+        confirm_password = request.form.get("confirm_password", "")
+
+        if not all([reset_code, new_password, confirm_password]):
+            flash("All fields are required.")
+            return render_template("reset_password.html")
+
+        if str(reset_code) != str(reset_data.get("token")):
+            flash("Invalid reset code.")
+            return render_template("reset_password.html")
+
+        if new_password != confirm_password:
+            flash("Passwords do not match.")
+            return render_template("reset_password.html")
+
+        if len(new_password) < 6:
+            flash("Password must be at least 6 characters.")
+            return render_template("reset_password.html")
+
+        # Update password
+        user_id = reset_data["user_id"]
+        new_hash = generate_password_hash(new_password)
+        
+        get_db().execute("UPDATE users SET password_hash=? WHERE id=?", (new_hash, user_id))
+        get_db().commit()
+        
+        # Clear reset session
+        session.pop("password_reset", None)
+        
+        user = get_user_by_id(user_id)
+        if user:
+            record_activity(user["username"], "password_reset", "User reset password")
+        
+        flash("Password reset successfully. Please log in with your new password.")
+        return redirect(url_for("login"))
+
+    return render_template("reset_password.html")
 
 
 
