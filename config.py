@@ -8,7 +8,9 @@ DEFAULT_MYSQL_DATABASE_URL = "mysql://aml:aml123@127.0.0.1:3306/aml"
 
 class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "aml-secret-key")
-    DATABASE_URL = os.environ.get("DATABASE_URL", DEFAULT_MYSQL_DATABASE_URL)
+    # Railway's MySQL service exposes MYSQL_URL by default.  DATABASE_URL
+    # remains preferred so other hosts can use their standard variable name.
+    DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("MYSQL_URL") or DEFAULT_MYSQL_DATABASE_URL
     DEBUG = False
     TESTING = False
     JSON_SORT_KEYS = False

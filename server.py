@@ -188,7 +188,7 @@ from users import (
     get_staff_accounts,
     create_user,
     get_user_by_account_number,
-    get_user_by_username,
+    get_user_by_username as fetch_user_by_username,
     get_user_by_id,
     update_user_balance,
     update_user_kyc_status,
@@ -535,6 +535,13 @@ app.config.setdefault(
 
 )
 
+# Messaging and background helpers open independent connections.  Default those
+# connections to the configured deployment database (including Railway MySQL).
+_database_connect_db = connect_db
+
+def connect_db(database_url=None):
+    return _database_connect_db(database_url or app.config["DATABASE"])
+
 
 
 # Ensure data directory exists for Railway
@@ -704,16 +711,20 @@ def handle_send_message(data):
         conn = connect_db()
         
         # Check permissions
-        sender_user = get_user_by_username(conn, sender)
-        receiver_user = get_user_by_username(conn, receiver)
+        sender_user = fetch_user_by_username(conn, sender)
+        receiver_user = fetch_user_by_username(conn, receiver)
         
         if not sender_user or not receiver_user:
             socketio.emit('error', {'message': 'User not found'})
             return
         
         can_message, reason = can_user_message(sender_user['role'], receiver_user['role'])
+        if can_message and not _is_authorized_messaging_counterpart(conn, sender_user, receiver):
+            can_message = False
+            reason = 'This is not your assigned secure messaging contact'
         if not can_message:
             socketio.emit('error', {'message': reason})
+            conn.close()
             return
         
         # Get or create conversation
@@ -819,13 +830,45 @@ def handle_mark_read(data):
 # Messaging API Routes
 # ============================================================================
 
+def _get_messaging_counterpart(conn, user):
+    """Return the single staff member a user is permitted to message."""
+    target_role = {
+        "admin": "compliance",
+        "compliance": "admin",
+        "customer": "compliance",
+    }.get(user["role"])
+
+    if not target_role:
+        return None
+
+    # Keep the assignment stable when more than one staff account exists.
+    return conn.execute(
+        "SELECT * FROM users WHERE role=? ORDER BY id ASC LIMIT 1",
+        (target_role,),
+    ).fetchone()
+
+
+def _is_authorized_messaging_counterpart(conn, user, username):
+    counterpart = _get_messaging_counterpart(conn, user)
+    return counterpart is not None and counterpart["username"] == username
+
+
 @app.route('/api/conversations', methods=['GET'])
 @login_required
 def api_get_conversations():
-    """Get all conversations for current user."""
+    """Get the current user's one permitted conversation, if it exists."""
     try:
         conn = connect_db()
+        current_user = fetch_user_by_username(conn, session['username'])
+        counterpart = _get_messaging_counterpart(conn, current_user) if current_user else None
         conversations = get_user_conversations(conn, session['username'])
+        if counterpart:
+            conversations = [
+                conversation for conversation in conversations
+                if conversation['other_participant'] == counterpart['username']
+            ]
+        else:
+            conversations = []
         conn.close()
         
         return jsonify({
@@ -843,6 +886,18 @@ def api_get_messages(conversation_id):
     """Get messages for a conversation."""
     try:
         conn = connect_db()
+        current_user = fetch_user_by_username(conn, session['username'])
+        allowed = any(
+            conversation['id'] == conversation_id
+            for conversation in get_user_conversations(conn, session['username'])
+            if current_user and _is_authorized_messaging_counterpart(
+                conn, current_user, conversation['other_participant']
+            )
+        )
+        if not allowed:
+            conn.close()
+            return jsonify({'status': 'error', 'message': 'Conversation is not available to this user'}), 403
+
         messages = get_conversation_messages(conn, conversation_id, limit=50)
         conn.close()
         
@@ -862,13 +917,17 @@ def api_can_message(username):
     try:
         conn = connect_db()
         
-        sender_user = get_user_by_username(conn, session['username'])
-        receiver_user = get_user_by_username(conn, username)
+        sender_user = fetch_user_by_username(conn, session['username'])
+        receiver_user = fetch_user_by_username(conn, username)
         
         if not sender_user or not receiver_user:
             return jsonify({'status': 'error', 'can_message': False, 'message': 'User not found'}), 404
         
         can_message, reason = can_user_message(sender_user['role'], receiver_user['role'])
+        if can_message:
+            can_message = _is_authorized_messaging_counterpart(conn, sender_user, username)
+            if not can_message:
+                reason = 'This is not your assigned secure messaging contact'
         conn.close()
         
         return jsonify({
@@ -924,31 +983,24 @@ def api_get_user_status(username):
 @app.route('/api/messageable-users', methods=['GET'])
 @login_required
 def api_get_messageable_users():
-    """Get list of users current user can message."""
+    """Get the one user current user is permitted to message."""
     try:
         conn = connect_db()
-        current_user = get_user_by_username(conn, session['username'])
+        current_user = fetch_user_by_username(conn, session['username'])
         
         if not current_user:
             return jsonify({'status': 'error', 'message': 'User not found'}), 404
         
-        # Get all users and filter by messaging permissions
-        all_users = get_all_users(conn)
+        counterpart = _get_messaging_counterpart(conn, current_user)
         messageable_users = []
-        
-        for user in all_users:
-            if user['username'] == session['username']:
-                continue
-            
-            can_message, _ = can_user_message(current_user['role'], user['role'])
-            if can_message:
-                status = get_user_online_status(conn, user['username'])
-                messageable_users.append({
-                    'username': user['username'],
-                    'role': user['role'],
-                    'is_online': status['is_online'],
-                    'last_seen': status['last_seen']
-                })
+        if counterpart:
+            status = get_user_online_status(conn, counterpart['username'])
+            messageable_users.append({
+                'username': counterpart['username'],
+                'role': counterpart['role'],
+                'is_online': status['is_online'],
+                'last_seen': status['last_seen']
+            })
         
         conn.close()
         
@@ -2806,15 +2858,20 @@ def login():
         password = request.form.get("password", "")
 
         staff_identifier = login_identifier or username
+        staff_username = next(
+            (name for name in STAFF_ACCOUNTS if name.casefold() == staff_identifier.casefold()),
+            None,
+        )
+        login_key = staff_username or staff_identifier
         # Security: Check rate limiting for staff login
-        can_login, lockout_message = check_login_attempts(staff_identifier)
+        can_login, lockout_message = check_login_attempts(login_key)
         if not can_login:
             flash(lockout_message)
             return render_template("login.html")
 
-        if staff_identifier in STAFF_ACCOUNTS:
-            staff = STAFF_ACCOUNTS[staff_identifier]
-            user = get_user_by_username(staff_identifier)
+        if staff_username:
+            staff = STAFF_ACCOUNTS[staff_username]
+            user = get_user_by_username(staff_username)
             if (
                 user
                 and user["role"] == staff["role"]
@@ -2822,13 +2879,14 @@ def login():
             ):
                 session["user_id"] = user["id"]
                 session["role"] = user["role"]
-                record_activity(staff_identifier, "login", f"Staff login from {request.remote_addr}")
-                record_login_attempt(staff_identifier, True)
+                session["username"] = user["username"]
+                record_activity(staff_username, "login", f"Staff login from {request.remote_addr}")
+                record_login_attempt(login_key, True)
                 flash("Welcome back.")
                 return redirect(url_for("dashboard_redirect"))
             flash("Invalid credentials.")
-            record_activity(staff_identifier, "failed_login", f"Failed staff login attempt from {request.remote_addr}")
-            is_locked = record_login_attempt(staff_identifier, False)
+            record_activity(staff_username, "failed_login", f"Failed staff login attempt from {request.remote_addr}")
+            is_locked = record_login_attempt(login_key, False)
             if is_locked:
                 flash("Too many failed attempts. Account locked for 15 minutes.")
             return render_template("login.html")
@@ -2857,6 +2915,7 @@ def login():
         ):
             session["user_id"] = user["id"]
             session["role"] = user["role"]
+            session["username"] = user["username"]
             record_activity(customer_identifier, "login", f"Login from {request.remote_addr}")
             record_login_attempt(customer_identifier, True)
             flash("Welcome back.")
