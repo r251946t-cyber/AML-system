@@ -32,13 +32,15 @@
   let currentConversation = null;
   let currentReceiver = "";
   let conversations = [];
-  let assignedContact = null;
+  let messageableUsers = [];
+  let activeContact = null;
+  let pendingMessage = "";
 
   document.addEventListener('DOMContentLoaded', async () => {
     setupEventListeners();
-    await loadAssignedContact();
+    await loadMessageableUsers();
     await loadConversations();
-    await openAssignedConversation();
+    await openContact(messageableUsers[0]);
   });
 
   function setupEventListeners() {
@@ -52,48 +54,51 @@
     });
   }
 
-  async function loadAssignedContact() {
+  async function loadMessageableUsers() {
     try {
       const data = await (await fetch('/api/messageable-users')).json();
-      assignedContact = data.status === 'success' ? (data.users || [])[0] || null : null;
-      renderConversation();
-    } catch (error) { console.error('Error loading assigned contact:', error); }
+      messageableUsers = data.status === 'success' ? data.users || [] : [];
+      renderConversations();
+    } catch (error) { console.error('Error loading messaging contacts:', error); }
   }
 
   async function loadConversations() {
     try {
       const data = await (await fetch('/api/conversations')).json();
       conversations = data.status === 'success' ? data.conversations || [] : [];
-      renderConversation();
+      renderConversations();
     } catch (error) { console.error('Error loading conversation:', error); }
   }
 
-  function renderConversation() {
+  function renderConversations() {
     const list = document.getElementById('conversationsList'); list.innerHTML = '';
-    if (!assignedContact) { list.innerHTML = '<li class="message-empty-state">Your assigned messaging contact is not available.</li>'; return; }
-    const conversation = conversations.find((item) => item.other_participant === assignedContact.username);
-    const item = document.createElement('li');
-    item.className = `conversation-item modern-thread ${currentReceiver === assignedContact.username ? 'active' : ''}`;
-    item.innerHTML = `<div class="conversation-avatar ${assignedContact.is_online ? 'online' : ''}">${getInitials(assignedContact.username)}</div><div class="conversation-info"><div class="conversation-name">${escapeHtml(assignedContact.username)}</div><div class="conversation-preview">${escapeHtml(conversation ? (conversation.content || 'No messages yet') : 'Start a secure conversation')}</div></div><div class="thread-meta">${conversation && conversation.unread_count > 0 ? `<span class="unread-badge">${conversation.unread_count}</span>` : ''}</div>`;
-    item.addEventListener('click', openAssignedConversation); list.appendChild(item);
+    if (!messageableUsers.length) { list.innerHTML = '<li class="message-empty-state">No secure messaging contacts are available.</li>'; return; }
+    messageableUsers.forEach((contact) => {
+      const conversation = conversations.find((item) => item.other_participant === contact.username);
+      const item = document.createElement('li');
+      item.className = `conversation-item modern-thread ${currentReceiver === contact.username ? 'active' : ''}`;
+      item.innerHTML = `<div class="conversation-avatar ${contact.is_online ? 'online' : ''}">${getInitials(contact.username)}</div><div class="conversation-info"><div class="conversation-name">${escapeHtml(contactLabel(contact))}</div><div class="conversation-preview">${escapeHtml(conversation ? (conversation.content || 'No messages yet') : 'Start a secure conversation')}</div></div><div class="thread-meta">${conversation && conversation.unread_count > 0 ? `<span class="unread-badge">${conversation.unread_count}</span>` : ''}</div>`;
+      item.addEventListener('click', () => openContact(contact)); list.appendChild(item);
+    });
   }
 
-  async function openAssignedConversation() {
-    if (!assignedContact) return;
-    const conversation = conversations.find((item) => item.other_participant === assignedContact.username);
-    currentReceiver = assignedContact.username; currentConversation = conversation ? conversation.id : null;
+  async function openContact(contact) {
+    if (!contact) return;
+    activeContact = contact;
+    const conversation = conversations.find((item) => item.other_participant === contact.username);
+    currentReceiver = contact.username; currentConversation = conversation ? conversation.id : null;
     openChat();
     if (conversation) { await loadMessages(conversation.id); socket.emit('mark_read', { conversation_id: conversation.id }); }
     else document.getElementById('messagesContainer').innerHTML = '<div class="message-empty-state message-empty-state--inline">Start a secure conversation.</div>';
-    renderConversation();
+    renderConversations();
   }
 
   function openChat() {
     document.getElementById('chatArea').hidden = true; document.getElementById('chatContent').hidden = false;
-    document.getElementById('chatTitle').textContent = assignedContact.username;
-    document.getElementById('chatAvatar').textContent = getInitials(assignedContact.username);
-    document.getElementById('statusIndicator').className = `status-indicator ${assignedContact.is_online ? '' : 'offline'}`;
-    document.getElementById('userStatus').textContent = assignedContact.is_online ? 'Online' : 'Offline';
+    document.getElementById('chatTitle').textContent = contactLabel(activeContact);
+    document.getElementById('chatAvatar').textContent = getInitials(activeContact.username);
+    document.getElementById('statusIndicator').className = `status-indicator ${activeContact.is_online ? '' : 'offline'}`;
+    document.getElementById('userStatus').textContent = activeContact.is_online ? 'Online' : 'Offline';
   }
 
   async function loadMessages(conversationId) {
@@ -107,14 +112,21 @@
   }
   function sendMessage() {
     const input = document.getElementById('messageInput'); const content = input.value.trim(); if (!content || !currentReceiver) return;
+    pendingMessage = content;
     socket.emit('send_message', { receiver: currentReceiver, content, conversation_id: currentConversation }); input.value = ''; input.style.height = 'auto';
     if (currentConversation) socket.emit('stop_typing', { conversation_id: currentConversation });
   }
   socket.on('new_message', async (message) => {
-    if (!assignedContact || (message.sender !== assignedContact.username && message.receiver !== assignedContact.username)) return;
+    if (!messageableUsers.some((contact) => message.sender === contact.username || message.receiver === contact.username)) return;
     const belongsToOpenThread = message.conversation_id === currentConversation || (!currentConversation && (message.sender === currentReceiver || message.receiver === currentReceiver));
-    if (belongsToOpenThread) { currentConversation = message.conversation_id; appendMessage({ content: message.content, sender: message.sender, timestamp: message.timestamp }, true); socket.emit('mark_read', { conversation_id: message.conversation_id }); }
+    if (belongsToOpenThread) { currentConversation = message.conversation_id; pendingMessage = ""; appendMessage({ content: message.content, sender: message.sender, timestamp: message.timestamp }, true); socket.emit('mark_read', { conversation_id: message.conversation_id }); }
     await loadConversations();
+  });
+  socket.on('message_error', (data) => {
+    const input = document.getElementById('messageInput');
+    if (pendingMessage && !input.value) input.value = pendingMessage;
+    input.focus();
+    alert(data.message || 'Message could not be sent. Please try again.');
   });
   socket.on('user_typing', (data) => {
     if (data.conversation_id === currentConversation && data.user !== currentUser) { const container = document.getElementById('messagesContainer'); if (!container.querySelector('.typing-indicator')) { const indicator = document.createElement('div'); indicator.className = 'typing-indicator'; indicator.innerHTML = '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>'; container.appendChild(indicator); } }
@@ -127,6 +139,7 @@
     const time = new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); group.innerHTML = `<div><div class="message-bubble">${escapeHtml(message.content)}</div><div class="message-time">${time}</div></div>`; container.appendChild(group); if (scroll) container.scrollTop = container.scrollHeight;
   }
   function getInitials(value) { return String(value || '--').slice(0, 2).toUpperCase(); }
+  function contactLabel(contact) { return contact.role === 'customer' ? contact.account_number : contact.username; }
   function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text || ''; return div.innerHTML; }
 </script>
 {% endblock %}

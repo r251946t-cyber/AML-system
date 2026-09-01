@@ -165,51 +165,6 @@
     );
   }
 
-  function MessagingSummaryCard({ audience }) {
-    const [summary, setSummary] = useState({ unread: 0, contacts: 0, loaded: false });
-
-    useEffect(() => {
-      let mounted = true;
-      Promise.all([
-        fetch("/api/unread-count").then((response) => response.json()).catch(() => null),
-        fetch("/api/messageable-users").then((response) => response.json()).catch(() => null),
-      ]).then(([unreadData, usersData]) => {
-        if (!mounted) return;
-        setSummary({
-          unread: unreadData && unreadData.status === "success" ? Number(unreadData.unread.total_unread || 0) : 0,
-          contacts: usersData && usersData.status === "success" ? (usersData.users || []).length : 0,
-          loaded: true,
-        });
-      });
-      return () => {
-        mounted = false;
-      };
-    }, []);
-
-    return h("div", { className: "card action-card dashboard-message-card" },
-      h("div", { className: "message-card-topline" },
-        h("span", { className: "message-card-icon", "aria-hidden": "true" }, h(Icon, { name: "message" })),
-        h("span", { className: "secure-chip" }, "Secure")
-      ),
-      h(PanelHeading, {
-        title: "Team Messaging",
-        meta: summary.unread > 0 ? h("span", { className: "message-card-alert" }, `${summary.unread} unread`) : h("span", { className: "status-pill" }, "Ready")
-      }),
-      h("p", { className: "muted-line" }, audience),
-      h("div", { className: "message-card-stats" },
-        h("span", null,
-          h("strong", null, summary.loaded ? summary.contacts : "-"),
-          h("small", null, "available contacts")
-        ),
-        h("span", null,
-          h("strong", null, summary.loaded ? summary.unread : "-"),
-          h("small", null, "unread messages")
-        )
-      ),
-      h("a", { className: "message-card-button", href: "/messages" }, "Open Messages")
-    );
-  }
-
   // Singleton SocketIO connection to prevent multiple connections
   let globalSocket = null;
   let globalHeartbeatInterval = null;
@@ -306,7 +261,6 @@
       { id: "overview", label: "Overview", icon: "home" },
       { id: "transactions", label: "Transactions", icon: "list" },
       { id: "alerts", label: "Alerts", icon: "alert" },
-      { id: "messages", label: "Messages", href: "/messages", icon: "message" },
       { id: "activity", label: "Activity Feed", icon: "activity" },
       { id: "signout", label: "Sign Out", href: "/logout", icon: "logout" }
     ];
@@ -437,7 +391,6 @@
                   h("button", { type: "submit" }, "Process Transaction")
                 )
               ),
-              h(MessagingSummaryCard, { audience: "Contact compliance support or bank staff from a focused, audit-aware message center." })
             )
           );
         case "transactions":
@@ -562,7 +515,6 @@
       { id: "users", label: "User Management", icon: "users" },
       { id: "transactions", label: "Transactions", icon: "list" },
       { id: "watchlist", label: "Watchlist", icon: "shield" },
-      { id: "messages", label: "Messages", href: "/messages", icon: "message" },
       { id: "activity", label: "Activity Feed", icon: "activity" },
       { id: "settings", label: "Settings", icon: "settings" },
       { id: "reports", label: "Reports", href: "/reports", icon: "file" },
@@ -890,7 +842,6 @@
     const sidebarItems = [
       { id: "overview", label: "Overview", icon: "home" },
       { id: "alerts", label: "Alerts", icon: "alert" },
-      { id: "messages", label: "Messages", href: "/messages", icon: "message" },
       { id: "activity", label: "Activity Feed", icon: "activity" },
       { id: "reports", label: "Reports", href: "/reports", icon: "file" },
       { id: "signout", label: "Sign Out", href: "/logout", icon: "logout" }
@@ -982,7 +933,6 @@
             h(StatGrid, { items: metricItems }),
             h("section", { className: "compliance-dashboard-grid grid" },
               h(AlertsPanel, { alerts, page: initialData.alert_page, pageCount: alertPageCount }),
-              h(MessagingSummaryCard, { audience: "Follow up on cases, customer queries, and internal reviews from a secure message hub." })
             )
           );
         case "alerts":

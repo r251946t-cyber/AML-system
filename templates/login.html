@@ -42,8 +42,11 @@
   const loginInput = document.querySelector('input[name="login"]');
   const idInput = document.querySelector('input[name="id_number"]');
   const syncIdRequirement = () => {
-    const value = loginInput.value.trim();
-    idInput.required = !(value === 'Admin' || value === 'Compliance');
+    const value = loginInput.value.trim().toLowerCase();
+    // Keep the page render-safe if this template is rendered outside Flask's
+    // normal context processors (for example, by a preview or test harness).
+    const staffIdentifiers = {{ staff_login_identifiers|default(['admin', 'compliance'], true)|tojson }};
+    idInput.required = !staffIdentifiers.includes(value);
   };
   loginInput.addEventListener('input', syncIdRequirement);
   syncIdRequirement();

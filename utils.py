@@ -274,7 +274,7 @@ def send_email(to_email, subject, body, html_body=None):
         logging.info(f"Attempting to connect to SMTP server {smtp_server}:{smtp_port}")
         
         # Connect to SMTP server and send
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
+        with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as server:
             print("Connected to SMTP server, starting TLS...")
             logging.info(f"Connected to SMTP server, starting TLS")
             server.starttls()  # Secure the connection

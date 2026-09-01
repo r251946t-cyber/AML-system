@@ -696,7 +696,7 @@ def handle_disconnect():
 def handle_send_message(data):
     """Handle incoming message."""
     if 'username' not in session:
-        socketio.emit('error', {'message': 'Not authenticated'})
+        socketio.emit('message_error', {'message': 'Not authenticated'}, to=request.sid)
         return
     
     sender = session['username']
@@ -704,7 +704,7 @@ def handle_send_message(data):
     content = data.get('content')
     
     if not receiver or not content:
-        socketio.emit('error', {'message': 'Missing receiver or content'})
+        socketio.emit('message_error', {'message': 'Missing receiver or content'}, to=request.sid)
         return
     
     try:
@@ -715,7 +715,8 @@ def handle_send_message(data):
         receiver_user = fetch_user_by_username(conn, receiver)
         
         if not sender_user or not receiver_user:
-            socketio.emit('error', {'message': 'User not found'})
+            socketio.emit('message_error', {'message': 'User not found'}, to=request.sid)
+            conn.close()
             return
         
         can_message, reason = can_user_message(sender_user['role'], receiver_user['role'])
@@ -723,7 +724,7 @@ def handle_send_message(data):
             can_message = False
             reason = 'This is not your assigned secure messaging contact'
         if not can_message:
-            socketio.emit('error', {'message': reason})
+            socketio.emit('message_error', {'message': reason}, to=request.sid)
             conn.close()
             return
         
@@ -757,7 +758,7 @@ def handle_send_message(data):
         conn.close()
     except Exception as e:
         app.logger.error(f"Error sending message: {e}")
-        socketio.emit('error', {'message': f'Failed to send message: {e}'})
+        socketio.emit('message_error', {'message': 'Message could not be sent. Please try again.'}, to=request.sid)
 
 
 @socketio.on('typing')
@@ -830,45 +831,43 @@ def handle_mark_read(data):
 # Messaging API Routes
 # ============================================================================
 
-def _get_messaging_counterpart(conn, user):
-    """Return the single staff member a user is permitted to message."""
-    target_role = {
-        "admin": "compliance",
-        "compliance": "admin",
-        "customer": "compliance",
-    }.get(user["role"])
+def _get_messaging_counterparts(conn, user):
+    """Return the users available to the current role in secure messaging."""
+    if user["role"] in {"admin", "customer"}:
+        target_role = "compliance"
+        return conn.execute(
+            "SELECT * FROM users WHERE role=? ORDER BY id ASC LIMIT 1",
+            (target_role,),
+        ).fetchall()
 
-    if not target_role:
-        return None
+    if user["role"] == "compliance":
+        # Compliance can respond to the Admin and to all bank customers.
+        return conn.execute(
+            "SELECT * FROM users WHERE role IN ('admin', 'customer') "
+            "ORDER BY CASE WHEN role='admin' THEN 0 ELSE 1 END, account_number ASC",
+        ).fetchall()
 
-    # Keep the assignment stable when more than one staff account exists.
-    return conn.execute(
-        "SELECT * FROM users WHERE role=? ORDER BY id ASC LIMIT 1",
-        (target_role,),
-    ).fetchone()
+    return []
 
 
 def _is_authorized_messaging_counterpart(conn, user, username):
-    counterpart = _get_messaging_counterpart(conn, user)
-    return counterpart is not None and counterpart["username"] == username
+    return any(counterpart["username"] == username for counterpart in _get_messaging_counterparts(conn, user))
 
 
 @app.route('/api/conversations', methods=['GET'])
 @login_required
 def api_get_conversations():
-    """Get the current user's one permitted conversation, if it exists."""
+    """Get conversations allowed for the current user's role."""
     try:
         conn = connect_db()
         current_user = fetch_user_by_username(conn, session['username'])
-        counterpart = _get_messaging_counterpart(conn, current_user) if current_user else None
+        counterparts = _get_messaging_counterparts(conn, current_user) if current_user else []
         conversations = get_user_conversations(conn, session['username'])
-        if counterpart:
-            conversations = [
-                conversation for conversation in conversations
-                if conversation['other_participant'] == counterpart['username']
-            ]
-        else:
-            conversations = []
+        allowed_usernames = {counterpart['username'] for counterpart in counterparts}
+        conversations = [
+            conversation for conversation in conversations
+            if conversation['other_participant'] in allowed_usernames
+        ]
         conn.close()
         
         return jsonify({
@@ -983,7 +982,7 @@ def api_get_user_status(username):
 @app.route('/api/messageable-users', methods=['GET'])
 @login_required
 def api_get_messageable_users():
-    """Get the one user current user is permitted to message."""
+    """Get the users current user is permitted to message."""
     try:
         conn = connect_db()
         current_user = fetch_user_by_username(conn, session['username'])
@@ -991,13 +990,13 @@ def api_get_messageable_users():
         if not current_user:
             return jsonify({'status': 'error', 'message': 'User not found'}), 404
         
-        counterpart = _get_messaging_counterpart(conn, current_user)
         messageable_users = []
-        if counterpart:
+        for counterpart in _get_messaging_counterparts(conn, current_user):
             status = get_user_online_status(conn, counterpart['username'])
             messageable_users.append({
                 'username': counterpart['username'],
                 'role': counterpart['role'],
+                'account_number': counterpart['account_number'],
                 'is_online': status['is_online'],
                 'last_seen': status['last_seen']
             })
@@ -1122,12 +1121,13 @@ def seed_demo_data():
 
     for username, email, id_number, pwd_hash, role, acct in default_users:
 
+        # Seed accounts are identified by their immutable username, not by email.
+        # Email is user-editable/configurable and is not unique in every legacy
+        # database, so matching it here could update the wrong account and leave
+        # the actual Admin/Compliance password stale.
         existing = conn.execute(
-
-            "SELECT id, id_number FROM users WHERE username = ? OR email = ?",
-
-            (username, email),
-
+            "SELECT id FROM users WHERE username = ?",
+            (username,),
         ).fetchone()
 
         if existing is None:
@@ -1422,7 +1422,12 @@ def broadcast_stats(conn=None):
 
 
 def send_otp_email_async(email, otp_code):
-    """Send OTP email using SMTP."""
+    """Send an OTP and report whether the SMTP server accepted it.
+
+    The legacy name is retained for existing callers. Registration must wait
+    for this result; otherwise it can claim a code was sent when delivery has
+    already failed.
+    """
     subject = "StanPro Bank - Verification Code"
     body = f"""
 Your verification code is: {otp_code}
@@ -1446,11 +1451,10 @@ StanPro Bank AML Intelligence Platform
 """
     result = send_email(email, subject, body, html_body)
     
-    # Always log OTP to console for debugging (fallback)
     if result:
         app.logger.info(f"OTP sent via email to {email}")
     else:
-        app.logger.warning(f"OTP email failed to send to {email}. OTP for testing: {otp_code}")
+        app.logger.error("OTP email delivery failed for %s", email)
     
     return result
 
@@ -2403,49 +2407,27 @@ def monitor_transactions():
 
 
 def ensure_background_monitor():
-
     if app.config.get("TESTING") or app.config.get("MONITOR_RUNNING"):
-
         return
 
     app.config["MONITOR_RUNNING"] = True
-
-    t = threading.Thread(target=monitor_transactions, daemon=True)
-
-    t.start()
-
-
-
+    threading.Thread(target=monitor_transactions, daemon=True).start()
 
 
 # ───────────────────────────────────────────────── Security / middleware ──
 
-
-
 @app.before_request
-
 def enforce_security_headers():
-
     request.environ.setdefault("werkzeug.request", request)
 
 
-
-
-
 @app.after_request
-
 def add_security_headers(response):
-
     response.headers["X-Content-Type-Options"] = "nosniff"
-
     response.headers["X-Frame-Options"] = "DENY"
-
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=()"
-
     return response
 
 
@@ -2459,7 +2441,14 @@ def inject_user():
 
         user = get_user_by_id(session["user_id"])
 
-    return {"current_user": user}
+    return {
+        "current_user": user,
+        "staff_login_identifiers": [
+            identifier.casefold()
+            for username, staff in STAFF_ACCOUNTS.items()
+            for identifier in (username, staff["email"])
+        ],
+    }
 
 
 
@@ -2617,7 +2606,7 @@ def send_otp_email(recipient_email, otp):
     return True
 
 
-def send_otp_email_async(recipient_email, otp):
+def _legacy_background_otp_sender(recipient_email, otp):
 
     def _send():
         with app.app_context():
@@ -2792,11 +2781,6 @@ def register():
         # Generate server-side OTP
         otp_code = f"{random.randint(100000, 999999)}"
         
-        # Print OTP to console for debugging
-        print(f"\n{'='*60}")
-        print(f"OTP GENERATED FOR {email}: {otp_code}")
-        print(f"{'='*60}\n")
-
         session["pending_registration"] = {
 
             "username": username, "email": email, "id_number": id_number,
@@ -2807,22 +2791,10 @@ def register():
 
         }
 
-        # Send OTP via SMTP
-        print(f"Attempting to send OTP email to {email}...")
-        try:
-
-            result = send_otp_email_async(email, otp_code)
-            print(f"Email send result: {result}")
-
-        except Exception as e:
-
+        # Do not show the verification step until SMTP accepts the message.
+        if not send_otp_email_async(email, otp_code):
             session.pop("pending_registration", None)
-
-            app.logger.error(f"OTP send failed: {str(e)}")
-            print(f"ERROR sending OTP: {e}")
-
             flash("Could not send verification code. Please check the email address or try again later.")
-
             return render_template("register.html")
 
         flash(f"Verification code sent to {email}.")
@@ -2857,9 +2829,16 @@ def login():
 
         password = request.form.get("password", "")
 
-        staff_identifier = login_identifier or username
+        # ``email`` is retained for API/backward-compatible form submissions;
+        # the browser form itself submits the same value as ``login``.
+        staff_identifier = login_identifier or username or email
         staff_username = next(
-            (name for name in STAFF_ACCOUNTS if name.casefold() == staff_identifier.casefold()),
+            (
+                name
+                for name, staff in STAFF_ACCOUNTS.items()
+                if name.casefold() == staff_identifier.casefold()
+                or staff["email"].casefold() == staff_identifier.casefold()
+            ),
             None,
         )
         login_key = staff_username or staff_identifier
@@ -2906,13 +2885,25 @@ def login():
             flash(ID_NUMBER_FORMAT_MESSAGE)
             return render_template("login.html")
 
-        user = get_user_by_email(email) if email else get_user_by_username(customer_identifier)
-        if (
-            user
-            and user["role"] == "customer"
-            and user["id_number"] == id_number
-            and check_password_hash(user["password_hash"], password)
-        ):
+        # MySQL collation varies by deployment.  Make customer lookup explicitly
+        # case-insensitive so an email or username's letter case cannot prevent login.
+        if email:
+            user = get_db().execute(
+                "SELECT * FROM users WHERE LOWER(email)=LOWER(?) LIMIT 1", (email,)
+            ).fetchone()
+        else:
+            user = get_db().execute(
+                "SELECT * FROM users WHERE LOWER(username)=LOWER(?) LIMIT 1", (customer_identifier,)
+            ).fetchone()
+
+        is_customer = bool(user and user["role"] == "customer")
+        # Older records may have been stored without the display hyphen or in
+        # lowercase. Normalize the persisted value before comparing it.
+        id_matches = bool(
+            is_customer and normalize_id_number(user["id_number"] or "") == id_number
+        )
+        password_matches = bool(id_matches and check_password_hash(user["password_hash"], password))
+        if password_matches:
             session["user_id"] = user["id"]
             session["role"] = user["role"]
             session["username"] = user["username"]
@@ -2920,6 +2911,13 @@ def login():
             record_login_attempt(customer_identifier, True)
             flash("Welcome back.")
             return redirect(url_for("dashboard_redirect"))
+
+        # Keep the UI response generic, but log enough to diagnose a deployment
+        # database mismatch without storing the supplied password or identifier.
+        app.logger.warning(
+            "Customer login rejected: account_found=%s role_customer=%s id_matches=%s password_matches=%s db_engine=%s",
+            bool(user), is_customer, id_matches, password_matches, get_db().engine,
+        )
         flash("Invalid credentials.")
         record_activity(customer_identifier, "failed_login", f"Failed login attempt from {request.remote_addr}")
         is_locked = record_login_attempt(customer_identifier, False)
@@ -2976,14 +2974,11 @@ def forgot_password():
             }
             
             # Send email with reset token
-            try:
-                send_otp_email_async(email, reset_token)
+            if send_otp_email_async(email, reset_token):
                 flash(f"Password reset code sent to {email}.")
                 return redirect(url_for("reset_password"))
-            except Exception as e:
-                app.logger.error(f"Failed to send reset email: {e}")
-                flash("Could not send reset code. Please try again later.")
-                return render_template("forgot_password.html")
+            flash("Could not send reset code. Please try again later.")
+            return render_template("forgot_password.html")
         
         # Always show same message for security (don't reveal if email exists)
         flash("If an account exists with this email, a reset code will be sent.")

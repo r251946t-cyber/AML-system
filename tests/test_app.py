@@ -411,7 +411,7 @@ def test_reports_show_alert_history(client):
     assert b"Suspicious transactions" in response.data
 
 
-def test_staff_login_requires_reserved_username(client):
+def test_staff_login_accepts_reserved_username_or_configured_email(client):
     response = client.post(
         "/login",
         data={"login": "Admin", "password": "Admin123"},
@@ -421,14 +421,13 @@ def test_staff_login_requires_reserved_username(client):
     assert b"Administrative Control Center" in response.data
 
     client.get("/logout", follow_redirects=True)
-    rejected = client.post(
+    staff_email_login = client.post(
         "/login",
-        data={"email": "admin@example.com", "id_number": "63-1000001A01", "password": "Admin123"},
+        data={"login": "ADMIN@EXAMPLE.COM", "password": "Admin123"},
         follow_redirects=True,
     )
-    assert rejected.status_code == 200
-    assert b"Administrative Control Center" not in rejected.data
-    assert b"Invalid credentials" in rejected.data or b"All fields are required" in rejected.data
+    assert staff_email_login.status_code == 200
+    assert b"Administrative Control Center" in staff_email_login.data
 
 
 def test_registration_cannot_create_staff_role(client):

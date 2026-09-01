@@ -131,10 +131,20 @@ def send_message(conn, conversation_id: int, sender: str, receiver: str, content
     )
     conn.commit()
     
-    # Get the inserted message
+    # Get the inserted message without relying on SQLite's last_insert_rowid().
+    # The application runs on MySQL as well, where that function does not
+    # exist; that made a successfully saved message appear to disappear before
+    # it could be emitted back to the browser.
     msg = conn.execute(
-        "SELECT id, sender_username, receiver_username, content, status, created_at FROM messages WHERE id = last_insert_rowid()"
+        """SELECT id, sender_username, receiver_username, content, status, created_at
+           FROM messages
+           WHERE conversation_id=? AND sender_username=? AND receiver_username=?
+             AND content=? AND created_at=?
+           ORDER BY id DESC LIMIT 1""",
+        (conversation_id, sender, receiver, content.strip(), now),
     ).fetchone()
+    if msg is None:
+        raise RuntimeError("Message was saved but could not be retrieved")
     
     # Update conversation's last message
     conn.execute(
