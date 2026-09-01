@@ -150,7 +150,7 @@ def get_schema_sql(database_url):
     else:
         ai, pk_type, text_type, long_text_type, real_type = "AUTOINCREMENT", "INTEGER", "TEXT", "TEXT", "REAL"
 
-    return f"""
+    schema_sql = f"""
     CREATE TABLE IF NOT EXISTS users (
         id {pk_type} PRIMARY KEY {ai},
         username {text_type} UNIQUE NOT NULL,
@@ -249,6 +249,26 @@ def get_schema_sql(database_url):
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         ip_address {text_type}
     );
+
+    CREATE TABLE IF NOT EXISTS activity_log (
+        id {pk_type} PRIMARY KEY {ai},
+        actor {text_type},
+        action {text_type} NOT NULL,
+        detail {long_text_type},
+        ip_address {text_type},
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS watchlist (
+        id {pk_type} PRIMARY KEY {ai},
+        name {text_type} NOT NULL,
+        id_number {text_type},
+        account_number {text_type},
+        list_type {text_type} NOT NULL,
+        reason {long_text_type},
+        added_by {text_type},
+        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
     """
     
     # MySQL doesn't support IF NOT EXISTS for indexes, handle separately
@@ -262,4 +282,7 @@ def get_schema_sql(database_url):
     CREATE INDEX IF NOT EXISTS idx_alerts_account ON alerts(account_number);
     CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
     CREATE INDEX IF NOT EXISTS idx_activity_user ON system_activity_log(user_id);
+    CREATE INDEX IF NOT EXISTS idx_activity_log_actor ON activity_log(actor);
+    CREATE INDEX IF NOT EXISTS idx_watchlist_type ON watchlist(list_type);
+    CREATE INDEX IF NOT EXISTS idx_watchlist_id_number ON watchlist(id_number);
     """

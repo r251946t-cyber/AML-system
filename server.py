@@ -277,6 +277,38 @@ def get_db():
     return g.db
 
 
+def login_required(view_func=None, *roles):
+    """Require a logged-in user, optionally limited to one or more roles."""
+    def decorator(func):
+        @wraps(func)
+        def wrapped(*args, **kwargs):
+            if "user_id" not in session:
+                flash("Please log in to continue.")
+                return redirect(url_for("login"))
+
+            user = get_user_by_id(session["user_id"])
+            if user is None:
+                session.clear()
+                flash("Session expired. Please log in again.")
+                return redirect(url_for("login"))
+
+            if roles and user["role"] not in roles:
+                flash("Access denied.")
+                return redirect(url_for("dashboard_redirect"))
+
+            return func(*args, **kwargs)
+
+        return wrapped
+
+    if callable(view_func):
+        return decorator(view_func)
+
+    if view_func is not None:
+        roles = (view_func, *roles)
+
+    return decorator
+
+
 @app.teardown_appcontext
 def close_db(_):
     db = g.pop("db", None)
@@ -318,7 +350,8 @@ def _migrate_sqlite(conn):
                          "ai_reason TEXT",
                          "rules_triggered TEXT DEFAULT '[]'", "ctr_required INTEGER DEFAULT 0",
                          "sar_required INTEGER DEFAULT 0", "destination_country TEXT DEFAULT 'ZW'",
-                         "screening_hits TEXT", "reviewed_by TEXT", "reviewed_at TEXT"],
+                         "screening_hits TEXT", "reviewed_by TEXT", "reviewed_at TEXT",
+                         "generated_label TEXT", "status TEXT DEFAULT 'Completed'"],
         "alerts": ["rules_triggered TEXT DEFAULT '[]'", "status TEXT DEFAULT 'open'",
                    "assigned_to TEXT", "case_notes TEXT", "resolved_at TEXT", "resolved_by TEXT"],
         "behavioral_profiles": ["account_number TEXT PRIMARY KEY", "profile_data TEXT", "last_updated TEXT", "total_transactions INTEGER DEFAULT 0"],
@@ -365,6 +398,7 @@ def _migrate_mysql(conn):
             ("reviewed_by", "VARCHAR(255)"),
             ("reviewed_at", "VARCHAR(255)"),
             ("generated_label", "VARCHAR(50)"),
+            ("status", "VARCHAR(50) DEFAULT 'Completed'"),
         ],
         "alerts": [
             ("rules_triggered", "LONGTEXT DEFAULT '[]'"),
@@ -431,6 +465,7 @@ def _migrate_postgres(conn):
             ("reviewed_by", "TEXT"),
             ("reviewed_at", "TEXT"),
             ("generated_label", "VARCHAR(50)"),
+            ("status", "VARCHAR(50) DEFAULT 'Completed'"),
         ],
         "alerts": [
             ("rules_triggered", "TEXT DEFAULT '[]'"),
@@ -2362,49 +2397,6 @@ def add_security_headers(response):
     return response
 
 
-
-
-
-def login_required(*roles):
-
-    def decorator(view_func):
-
-        @wraps(view_func)
-
-        def wrapped(*args, **kwargs):
-
-            if "user_id" not in session:
-
-                flash("Please log in to continue.")
-
-                return redirect(url_for("login"))
-
-            user = get_user_by_id(session["user_id"])
-
-            if user is None:
-
-                session.clear()
-
-                flash("Session expired. Please log in again.")
-
-                return redirect(url_for("login"))
-
-            if roles and user and user["role"] not in roles:
-
-                flash("Access denied.")
-
-                return redirect(url_for("dashboard_redirect"))
-
-            return view_func(*args, **kwargs)
-
-        return wrapped
-
-    return decorator
-
-
-
-
-
 @app.context_processor
 
 def inject_user():
@@ -4035,19 +4027,23 @@ def migrate_database():
     conn = get_db()
 
     try:
-        if not is_postgres_database_url(app.config["DATABASE"]) and not is_mysql_database_url(app.config["DATABASE"]):
+        # Keep deployed databases in sync with the current application schema.
+        # CREATE ... IF NOT EXISTS makes table/index creation safe to re-run.
+        conn.executescript(get_schema_sql(app.config["DATABASE"]))
+        conn.executescript(create_messaging_tables_sql(app.config["DATABASE"]))
 
-            _migrate_sqlite(conn)
-
+        if is_postgres_database_url(app.config["DATABASE"]):
+            _migrate_postgres(conn)
         elif is_mysql_database_url(app.config["DATABASE"]):
-
             _migrate_mysql(conn)
+        else:
+            _migrate_sqlite(conn)
 
         conn.commit()
 
         record_activity(admin_user["username"], "migrate_database", "Ran database migration")
 
-        flash("Database migration completed successfully.")
+        flash("Database migration completed successfully. Missing tables and columns are now up to date.")
 
     except Exception as e:
 
@@ -4309,25 +4305,24 @@ def ensure_ai_model_ready():
 
 
 
-# Initialize database on startup (for gunicorn deployment)
-try:
+def initialize_startup():
     init_db()
     seed_demo_data()
     ensure_ai_model_ready()
     ensure_background_monitor()
-except Exception as e:
-    logging.error(f"Error during startup initialization: {e}")
+
+
+# Initialize database on startup when imported by a WSGI server.
+if __name__ != "__main__":
+    try:
+        initialize_startup()
+    except Exception as e:
+        logging.error(f"Error during startup initialization: {e}")
 
 
 if __name__ == "__main__":
 
-    init_db()
-
-    seed_demo_data()
-
-    ensure_ai_model_ready()
-
-    ensure_background_monitor()
+    initialize_startup()
 
     socketio.run(
 

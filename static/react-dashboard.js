@@ -74,6 +74,10 @@
         h("path", { d: "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z", fill: "none", stroke: "currentColor", strokeWidth: 2 }),
         h("line", { x1: "12", y1: "9", x2: "12", y2: "13", stroke: "currentColor", strokeWidth: 2 }),
         h("line", { x1: "12", y1: "17", x2: "12.01", y2: "17", stroke: "currentColor", strokeWidth: 2 })
+      ),
+      message: h("svg", { viewBox: "0 0 24 24" },
+        h("path", { d: "M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z", fill: "none", stroke: "currentColor", strokeWidth: 2 }),
+        h("path", { d: "M8 9h8M8 13h5", fill: "none", stroke: "currentColor", strokeWidth: 2 })
       )
     };
     return icons[name] || null;
@@ -158,6 +162,51 @@
     return h("span", { className: `live-status ${tone}` },
       h("span", { className: "live-dot", "aria-hidden": "true" }),
       children
+    );
+  }
+
+  function MessagingSummaryCard({ audience }) {
+    const [summary, setSummary] = useState({ unread: 0, contacts: 0, loaded: false });
+
+    useEffect(() => {
+      let mounted = true;
+      Promise.all([
+        fetch("/api/unread-count").then((response) => response.json()).catch(() => null),
+        fetch("/api/messageable-users").then((response) => response.json()).catch(() => null),
+      ]).then(([unreadData, usersData]) => {
+        if (!mounted) return;
+        setSummary({
+          unread: unreadData && unreadData.status === "success" ? Number(unreadData.unread.total_unread || 0) : 0,
+          contacts: usersData && usersData.status === "success" ? (usersData.users || []).length : 0,
+          loaded: true,
+        });
+      });
+      return () => {
+        mounted = false;
+      };
+    }, []);
+
+    return h("div", { className: "card action-card dashboard-message-card" },
+      h("div", { className: "message-card-topline" },
+        h("span", { className: "message-card-icon", "aria-hidden": "true" }, h(Icon, { name: "message" })),
+        h("span", { className: "secure-chip" }, "Secure")
+      ),
+      h(PanelHeading, {
+        title: "Team Messaging",
+        meta: summary.unread > 0 ? h("span", { className: "message-card-alert" }, `${summary.unread} unread`) : h("span", { className: "status-pill" }, "Ready")
+      }),
+      h("p", { className: "muted-line" }, audience),
+      h("div", { className: "message-card-stats" },
+        h("span", null,
+          h("strong", null, summary.loaded ? summary.contacts : "-"),
+          h("small", null, "available contacts")
+        ),
+        h("span", null,
+          h("strong", null, summary.loaded ? summary.unread : "-"),
+          h("small", null, "unread messages")
+        )
+      ),
+      h("a", { className: "message-card-button", href: "/messages" }, "Open Messages")
     );
   }
 
@@ -257,6 +306,7 @@
       { id: "overview", label: "Overview", icon: "home" },
       { id: "transactions", label: "Transactions", icon: "list" },
       { id: "alerts", label: "Alerts", icon: "alert" },
+      { id: "messages", label: "Messages", href: "/messages", icon: "message" },
       { id: "activity", label: "Activity Feed", icon: "activity" },
       { id: "signout", label: "Sign Out", href: "/logout", icon: "logout" }
     ];
@@ -386,7 +436,8 @@
                   h("p", { className: "form-hint" }, "Recipient is required for transfers only."),
                   h("button", { type: "submit" }, "Process Transaction")
                 )
-              )
+              ),
+              h(MessagingSummaryCard, { audience: "Contact compliance support or bank staff from a focused, audit-aware message center." })
             )
           );
         case "transactions":
@@ -511,6 +562,7 @@
       { id: "users", label: "User Management", icon: "users" },
       { id: "transactions", label: "Transactions", icon: "list" },
       { id: "watchlist", label: "Watchlist", icon: "shield" },
+      { id: "messages", label: "Messages", href: "/messages", icon: "message" },
       { id: "activity", label: "Activity Feed", icon: "activity" },
       { id: "settings", label: "Settings", icon: "settings" },
       { id: "reports", label: "Reports", href: "/reports", icon: "file" },
@@ -658,7 +710,8 @@
                   h("input", { name: "wl_reason" }),
                   h("button", { type: "submit" }, "Add to Watchlist")
                 )
-              )
+              ),
+              h(MessagingSummaryCard, { audience: "Coordinate with compliance officers and customer support without leaving the AML control workflow." })
             )
           );
         case "users":
@@ -837,6 +890,7 @@
     const sidebarItems = [
       { id: "overview", label: "Overview", icon: "home" },
       { id: "alerts", label: "Alerts", icon: "alert" },
+      { id: "messages", label: "Messages", href: "/messages", icon: "message" },
       { id: "activity", label: "Activity Feed", icon: "activity" },
       { id: "reports", label: "Reports", href: "/reports", icon: "file" },
       { id: "signout", label: "Sign Out", href: "/logout", icon: "logout" }
@@ -926,7 +980,10 @@
         case "overview":
           return h(window.React.Fragment, null,
             h(StatGrid, { items: metricItems }),
-            h(AlertsPanel, { alerts, page: initialData.alert_page, pageCount: alertPageCount })
+            h("section", { className: "compliance-dashboard-grid grid" },
+              h(AlertsPanel, { alerts, page: initialData.alert_page, pageCount: alertPageCount }),
+              h(MessagingSummaryCard, { audience: "Follow up on cases, customer queries, and internal reviews from a secure message hub." })
+            )
           );
         case "alerts":
           return h(AlertsPanel, { alerts, page: initialData.alert_page, pageCount: alertPageCount });
