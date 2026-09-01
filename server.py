@@ -231,6 +231,22 @@ from reports import (
     log_system_activity,
     get_activity_log,
 )
+from messaging import (
+    create_messaging_tables_sql,
+    get_or_create_conversation,
+    send_message,
+    get_conversation_messages,
+    get_user_conversations,
+    get_unread_count,
+    mark_conversation_as_read,
+    add_unread_message,
+    set_user_online,
+    get_user_online_status,
+    set_typing_indicator,
+    can_user_message,
+    mark_message_as_delivered,
+    mark_message_as_read,
+)
 
 
 load_dotenv()
@@ -276,6 +292,10 @@ def init_db():
     conn = connect_db(app.config["DATABASE"])
     conn.executescript(get_schema_sql(app.config["DATABASE"]))
     
+    # Add messaging tables
+    messaging_sql = create_messaging_tables_sql(app.config["DATABASE"])
+    conn.executescript(messaging_sql)
+    
     # SQLite migration: add new columns to existing tables
     if not is_postgres_database_url(app.config["DATABASE"]) and not is_mysql_database_url(app.config["DATABASE"]):
         _migrate_sqlite(conn)
@@ -310,6 +330,13 @@ def _migrate_sqlite(conn):
             col_name = col_def.split()[0]
             if col_name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+    
+    # Create messaging tables if they don't exist
+    messaging_sql = create_messaging_tables_sql(app.config["DATABASE"])
+    for statement in messaging_sql.split(";"):
+        statement = statement.strip()
+        if statement:
+            conn.execute(statement)
 
 
 def _migrate_mysql(conn):
@@ -366,6 +393,16 @@ def _migrate_mysql(conn):
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {column_def}")
         except Exception as e:
             logging.error(f"Error adding columns to {table}: {e}")
+    
+    # Create messaging tables if they don't exist
+    messaging_sql = create_messaging_tables_sql(app.config["DATABASE"])
+    for statement in messaging_sql.split(";"):
+        statement = statement.strip()
+        if statement:
+            try:
+                conn.execute(statement)
+            except Exception as e:
+                logging.error(f"Error creating messaging table: {e}")
 
 
 def _migrate_postgres(conn):
@@ -422,6 +459,16 @@ def _migrate_postgres(conn):
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {column_def}")
         except Exception as e:
             logging.error(f"Error adding columns to {table}: {e}")
+    
+    # Create messaging tables if they don't exist
+    messaging_sql = create_messaging_tables_sql(app.config["DATABASE"])
+    for statement in messaging_sql.split(";"):
+        statement = statement.strip()
+        if statement:
+            try:
+                conn.execute(statement)
+            except Exception as e:
+                logging.error(f"Error creating messaging table: {e}")
 
 
 # ============================================================================
@@ -588,6 +635,295 @@ def handle_disconnect():
                 app.logger.error(f"Failed to remove presence from Redis: {e}")
         else:
             app.logger.info(f"User {user_id} (role: {role}) disconnected from SocketIO")
+    
+    # Mark user as offline
+    try:
+        conn = connect_db()
+        if 'username' in session:
+            set_user_online(conn, session['username'], False)
+        conn.close()
+    except:
+        pass
+
+
+# ============================================================================
+# Messaging WebSocket Handlers
+# ============================================================================
+
+@socketio.on('send_message')
+def handle_send_message(data):
+    """Handle incoming message."""
+    if 'username' not in session:
+        socketio.emit('error', {'message': 'Not authenticated'})
+        return
+    
+    sender = session['username']
+    receiver = data.get('receiver')
+    content = data.get('content')
+    
+    if not receiver or not content:
+        socketio.emit('error', {'message': 'Missing receiver or content'})
+        return
+    
+    try:
+        conn = connect_db()
+        
+        # Check permissions
+        sender_user = get_user_by_username(conn, sender)
+        receiver_user = get_user_by_username(conn, receiver)
+        
+        if not sender_user or not receiver_user:
+            socketio.emit('error', {'message': 'User not found'})
+            return
+        
+        can_message, reason = can_user_message(sender_user['role'], receiver_user['role'])
+        if not can_message:
+            socketio.emit('error', {'message': reason})
+            return
+        
+        # Get or create conversation
+        conv = get_or_create_conversation(conn, sender, receiver)
+        
+        # Send message
+        msg = send_message(conn, conv['id'], sender, receiver, content, sender_user['role'])
+        
+        # Mark as unread for receiver
+        add_unread_message(conn, conv['id'], receiver)
+        
+        # Emit to both users
+        message_data = {
+            'id': msg['id'],
+            'sender': sender,
+            'receiver': receiver,
+            'content': msg['content'],
+            'status': 'sent',
+            'timestamp': msg['created_at'],
+            'conversation_id': conv['id']
+        }
+        
+        # Broadcast to both participants
+        socketio.emit('new_message', message_data, broadcast=True)
+        
+        # Broadcast unread badge update
+        unread = get_unread_count(conn, receiver)
+        socketio.emit('unread_update', unread, to=receiver)
+        
+        conn.close()
+    except Exception as e:
+        app.logger.error(f"Error sending message: {e}")
+        socketio.emit('error', {'message': f'Failed to send message: {e}'})
+
+
+@socketio.on('typing')
+def handle_typing(data):
+    """Handle typing indicator."""
+    if 'username' not in session:
+        return
+    
+    username = session['username']
+    conversation_id = data.get('conversation_id')
+    
+    try:
+        conn = connect_db()
+        set_typing_indicator(conn, username, conversation_id)
+        conn.close()
+        
+        # Broadcast typing status
+        socketio.emit('user_typing', {
+            'user': username,
+            'conversation_id': conversation_id
+        }, broadcast=True)
+    except Exception as e:
+        app.logger.error(f"Error handling typing: {e}")
+
+
+@socketio.on('stop_typing')
+def handle_stop_typing(data):
+    """Handle stop typing indicator."""
+    if 'username' not in session:
+        return
+    
+    username = session['username']
+    conversation_id = data.get('conversation_id')
+    
+    try:
+        conn = connect_db()
+        set_typing_indicator(conn, username, None)
+        conn.close()
+        
+        socketio.emit('user_stop_typing', {
+            'user': username,
+            'conversation_id': conversation_id
+        }, broadcast=True)
+    except Exception as e:
+        app.logger.error(f"Error handling stop typing: {e}")
+
+
+@socketio.on('mark_read')
+def handle_mark_read(data):
+    """Mark messages as read."""
+    if 'username' not in session:
+        return
+    
+    username = session['username']
+    conversation_id = data.get('conversation_id')
+    
+    try:
+        conn = connect_db()
+        mark_conversation_as_read(conn, conversation_id, username)
+        conn.close()
+        
+        # Update unread badge
+        unread = get_unread_count(conn, username)
+        socketio.emit('unread_update', unread, to=username)
+    except Exception as e:
+        app.logger.error(f"Error marking messages as read: {e}")
+
+
+# ============================================================================
+# Messaging API Routes
+# ============================================================================
+
+@app.route('/api/conversations', methods=['GET'])
+@login_required
+def api_get_conversations():
+    """Get all conversations for current user."""
+    try:
+        conn = connect_db()
+        conversations = get_user_conversations(conn, session['username'])
+        conn.close()
+        
+        return jsonify({
+            'status': 'success',
+            'conversations': conversations
+        })
+    except Exception as e:
+        app.logger.error(f"Error fetching conversations: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/conversations/<int:conversation_id>/messages', methods=['GET'])
+@login_required
+def api_get_messages(conversation_id):
+    """Get messages for a conversation."""
+    try:
+        conn = connect_db()
+        messages = get_conversation_messages(conn, conversation_id, limit=50)
+        conn.close()
+        
+        return jsonify({
+            'status': 'success',
+            'messages': messages
+        })
+    except Exception as e:
+        app.logger.error(f"Error fetching messages: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/users/<username>/can-message', methods=['GET'])
+@login_required
+def api_can_message(username):
+    """Check if current user can message target user."""
+    try:
+        conn = connect_db()
+        
+        sender_user = get_user_by_username(conn, session['username'])
+        receiver_user = get_user_by_username(conn, username)
+        
+        if not sender_user or not receiver_user:
+            return jsonify({'status': 'error', 'can_message': False, 'message': 'User not found'}), 404
+        
+        can_message, reason = can_user_message(sender_user['role'], receiver_user['role'])
+        conn.close()
+        
+        return jsonify({
+            'status': 'success',
+            'can_message': can_message,
+            'reason': reason,
+            'target_user': {
+                'username': username,
+                'role': receiver_user['role']
+            }
+        })
+    except Exception as e:
+        app.logger.error(f"Error checking message permissions: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/unread-count', methods=['GET'])
+@login_required
+def api_get_unread_count():
+    """Get unread message counts."""
+    try:
+        conn = connect_db()
+        unread = get_unread_count(conn, session['username'])
+        conn.close()
+        
+        return jsonify({
+            'status': 'success',
+            'unread': unread
+        })
+    except Exception as e:
+        app.logger.error(f"Error fetching unread count: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/user-status/<username>', methods=['GET'])
+@login_required
+def api_get_user_status(username):
+    """Get user's online status."""
+    try:
+        conn = connect_db()
+        status = get_user_online_status(conn, username)
+        conn.close()
+        
+        return jsonify({
+            'status': 'success',
+            'user_status': status
+        })
+    except Exception as e:
+        app.logger.error(f"Error fetching user status: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/messageable-users', methods=['GET'])
+@login_required
+def api_get_messageable_users():
+    """Get list of users current user can message."""
+    try:
+        conn = connect_db()
+        current_user = get_user_by_username(conn, session['username'])
+        
+        if not current_user:
+            return jsonify({'status': 'error', 'message': 'User not found'}), 404
+        
+        # Get all users and filter by messaging permissions
+        all_users = get_all_users(conn)
+        messageable_users = []
+        
+        for user in all_users:
+            if user['username'] == session['username']:
+                continue
+            
+            can_message, _ = can_user_message(current_user['role'], user['role'])
+            if can_message:
+                status = get_user_online_status(conn, user['username'])
+                messageable_users.append({
+                    'username': user['username'],
+                    'role': user['role'],
+                    'is_online': status['is_online'],
+                    'last_seen': status['last_seen']
+                })
+        
+        conn.close()
+        
+        return jsonify({
+            'status': 'success',
+            'users': messageable_users
+        })
+    except Exception as e:
+        app.logger.error(f"Error fetching messageable users: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 # ============================================================================
@@ -2164,7 +2500,22 @@ def dashboard_redirect():
     return redirect(url_for("admin_dashboard"))
 
 
-
+@app.route("/messages")
+@login_required
+def messages():
+    """Real-time messaging page."""
+    user = get_user_by_id(session["user_id"])
+    
+    if not user:
+        flash("User not found.")
+        return redirect(url_for("login"))
+    
+    # Check if user can message
+    if user["role"] not in ["admin", "compliance", "customer"]:
+        flash("You don't have permission to access messaging.")
+        return redirect(url_for("dashboard_redirect"))
+    
+    return render_template("messages.html", user=user)
 
 
 # ── Auth ──

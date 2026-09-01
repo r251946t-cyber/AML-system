@@ -1,13 +1,13 @@
 {
   "version": "2.0.0",
-  "trained_at": "2026-08-19T22:11:30.226092+00:00",
-  "training_samples": 1000,
+  "trained_at": "2026-09-01T11:21:52.170131+00:00",
+  "training_samples": 7016,
   "label_distribution": {
-    "normal": 600,
-    "suspicious": 250,
-    "super_suspicious": 150
+    "normal": 4808,
+    "suspicious": 1458,
+    "super_suspicious": 750
   },
-  "cross_val_f1_weighted": 0.9457903263239242,
+  "cross_val_f1_weighted": 0.9645517144132706,
   "feature_count": 25,
   "algorithm": "RandomForest + IsolationForest ensemble"
 }

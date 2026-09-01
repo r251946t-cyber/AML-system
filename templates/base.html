@@ -43,6 +43,16 @@
             <p>Banking &bull; Insurance &bull; Investments</p>
           </div>
         </div>
+        
+        <!-- Messaging Link -->
+        <div class="topbar-actions">
+          <a href="{{ url_for('messages') }}" class="topbar-message-link" title="Messages">
+            <svg viewBox="0 0 24 24" width="24" height="24">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+            </svg>
+            <span class="message-badge" id="messageBadge" style="display: none;">0</span>
+          </a>
+        </div>
       </header>
 
       <main>
@@ -119,6 +129,43 @@
             top: 0,
             behavior: "smooth"
           });
+        });
+      }
+
+      // Messaging badge update
+      function updateUnreadBadge() {
+        const badge = document.getElementById('messageBadge');
+        if (!badge) return;
+
+        fetch('/api/unread-count')
+          .then(response => response.json())
+          .then(data => {
+            if (data.status === 'success') {
+              const totalUnread = data.unread.total_unread;
+              if (totalUnread > 0) {
+                badge.textContent = totalUnread;
+                badge.style.display = 'flex';
+              } else {
+                badge.style.display = 'none';
+              }
+            }
+          })
+          .catch(error => console.error('Error fetching unread count:', error));
+      }
+
+      // Load unread badge on page load
+      document.addEventListener('DOMContentLoaded', updateUnreadBadge);
+
+      // Connect to WebSocket and listen for message updates
+      if (typeof io !== 'undefined') {
+        const socket = io();
+        
+        socket.on('unread_update', (data) => {
+          updateUnreadBadge();
+        });
+
+        socket.on('new_message', (data) => {
+          updateUnreadBadge();
         });
       }
     </script>
