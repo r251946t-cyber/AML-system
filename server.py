@@ -1709,7 +1709,20 @@ def process_transaction_event(
         conn, transaction_id, sender_account, receiver_account, amount, timestamp
     ))
     ml_level, ml_confidence, _ = predict_risk_level(ml_features)
-    ml_score = AI_RISK_SCORES.get(ml_level, 0) if ml_confidence >= 0.65 else 0
+    
+    # Adaptive confidence threshold: higher-risk levels tolerate lower confidence
+    # super_suspicious: 0.55 threshold (catch risky transactions even with modest confidence)
+    # suspicious: 0.65 threshold (standard AML risk threshold)
+    # normal: 0.75 threshold (require high confidence to avoid false positives)
+    confidence_threshold = 0.65  # default
+    if ml_level == "super_suspicious":
+        confidence_threshold = 0.55
+    elif ml_level == "suspicious":
+        confidence_threshold = 0.65
+    else:
+        confidence_threshold = 0.75
+    
+    ml_score = AI_RISK_SCORES.get(ml_level, 0) if ml_confidence >= confidence_threshold else 0
 
     # AI only contributes when confident.  Rules marked critical (and
     # sanctions) are non-downgradable; all other signals must independently
