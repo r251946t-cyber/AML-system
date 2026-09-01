@@ -25,7 +25,6 @@
     </div>
   </section>
 </section>
-<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script>
   const socket = io();
   const currentUser = {{ session.get("username", "")|tojson }};

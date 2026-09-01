@@ -102,7 +102,7 @@ from flask import (
 
 )
 
-from flask_socketio import SocketIO
+from flask_socketio import SocketIO, join_room
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -598,6 +598,12 @@ def handle_connect():
     user_id = session.get('user_id')
     role = session.get('role', 'unknown')
     sid = request.sid
+    username = session.get('username')
+    if username:
+        # Every browser tab for a signed-in user joins the same private room.
+        # This makes unread badges update immediately without exposing direct
+        # messages to unrelated connected clients.
+        join_room(f"user:{username}")
     
     # Rate limit connection logging to prevent log spam
     broker = app.extensions.get('realtime_broker')
@@ -748,12 +754,15 @@ def handle_send_message(data):
             'conversation_id': conv['id']
         }
         
-        # Broadcast to both participants
-        socketio.emit('new_message', message_data, broadcast=True)
+        # Deliver only to the sender and recipient.  Broadcasting direct
+        # messages to every connected client was both noisy and unsafe.
+        socketio.emit('new_message', message_data, to=f"user:{sender}")
+        if receiver != sender:
+            socketio.emit('new_message', message_data, to=f"user:{receiver}")
         
         # Broadcast unread badge update
         unread = get_unread_count(conn, receiver)
-        socketio.emit('unread_update', unread, to=receiver)
+        socketio.emit('unread_update', unread, to=f"user:{receiver}")
         
         conn.close()
     except Exception as e:
@@ -822,7 +831,7 @@ def handle_mark_read(data):
         
         # Update unread badge
         unread = get_unread_count(conn, username)
-        socketio.emit('unread_update', unread, to=username)
+        socketio.emit('unread_update', unread, to=f"user:{username}")
     except Exception as e:
         app.logger.error(f"Error marking messages as read: {e}")
 

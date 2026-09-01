@@ -7,3 +7,14 @@ INFO:werkzeug:[31m[1mWARNING: This is a development server. Do not use it in a
  * Running on http://127.0.0.1:5000
  * Running on http://10.0.21.246:5000
 INFO:werkzeug:[33mPress CTRL+C to quit[0m
+INFO:werkzeug:127.0.0.1 - - [01/Sep/2026 18:25:47] "GET /health HTTP/1.1" 200 -
+WARNING:server:User 1 (role: admin) connected via SocketIO (no Redis presence tracking)
+INFO:werkzeug:127.0.0.1 - - [01/Sep/2026 18:25:52] "GET /socket.io/?EIO=4&transport=polling&t=Q1TofMV HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [01/Sep/2026 18:25:52] "GET /socket.io/?EIO=4&transport=polling&t=Q1TofMY HTTP/1.1" 200 -
+WARNING:server:User 2 (role: compliance) connected via SocketIO (no Redis presence tracking)
+INFO:werkzeug:127.0.0.1 - - [01/Sep/2026 18:25:52] "POST /socket.io/?EIO=4&transport=polling&t=Q1TofNa&sid=2YTQP8DiDjyoEWZTAAAC HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [01/Sep/2026 18:25:52] "GET /socket.io/?EIO=4&transport=polling&t=Q1TofNd&sid=2YTQP8DiDjyoEWZTAAAC HTTP/1.1" 200 -
+WARNING:server:User 2 (role: compliance) connected via SocketIO (no Redis presence tracking)
+INFO:werkzeug:127.0.0.1 - - [01/Sep/2026 18:25:52] "POST /socket.io/?EIO=4&transport=polling&t=Q1TofNf&sid=UT6vD5N2q80Wg1mCAAAD HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [01/Sep/2026 18:25:52] "GET /socket.io/?EIO=4&transport=polling&t=Q1TofNh&sid=UT6vD5N2q80Wg1mCAAAD HTTP/1.1" 200 -
+INFO:werkzeug:127.0.0.1 - - [01/Sep/2026 18:25:52] "GET /socket.io/?EIO=4&transport=polling&t=Q1TofOL&sid=UT6vD5N2q80Wg1mCAAAD HTTP/1.1" 200 -
